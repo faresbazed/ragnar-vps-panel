@@ -3,7 +3,7 @@
 # Revives any dead panel service so a crashed backend never takes a
 # shared port down with it (HAProxy also health-checks and skips dead
 # backends in the meantime).
-SERVICES="haproxy xray sing-box ragnar-wsproxy ragnar-landing dropbear zivpn udp-custom udpgw slowdns"
+SERVICES="haproxy xray sing-box ragnar-wsproxy ragnar-landing dropbear zivpn udp-custom badvpn-udpgw slowdns"
 for svc in $SERVICES; do
     if systemctl list-unit-files "$svc.service" >/dev/null 2>&1 \
        && systemctl is-enabled --quiet "$svc" 2>/dev/null \

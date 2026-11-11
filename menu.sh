@@ -100,7 +100,8 @@ print_header() {
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "DROPBEAR" "$(svc_dot dropbear)" "SING-BOX" "$(svc_dot sing-box)"
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "UDP CUSTOM" "$(svc_dot udp-custom)" "UDP ZIVPN" "$(svc_dot zivpn)"
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SSH WS" "$(svc_dot ragnar-wsproxy)" "WSS / SSL" "$(svc_dot haproxy)"
-    printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SLOWDNS" "$(svc_dot slowdns)" "CLOUDFLARED" "$(svc_dot_cf)"
+    printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SLOWDNS" "$(svc_dot slowdns)" "BADVPN" "$(svc_dot badvpn-udpgw)"
+    printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "CLOUDFLARED" "$(svc_dot_cf)" "" ""
 }
 
 main_menu() {
@@ -248,7 +249,7 @@ udpcustom_menu() {
         echo "1) Restart    2) Status log    0) Back"
         read -rp "Choice: " c
         case $c in
-            1) systemctl restart udp-custom udpgw; echo restarted; pause ;;
+            1) systemctl restart udp-custom badvpn-udpgw; echo restarted; pause ;;
             2) systemctl --no-pager status udp-custom | head -20; pause ;;
             0) return ;;
         esac
@@ -331,7 +332,7 @@ tools_menu() {
         read -rp "Choice: " c
         case $c in
             1) systemctl restart haproxy xray sing-box ragnar-wsproxy dropbear \
-                   zivpn udp-custom udpgw slowdns 2>/dev/null; echo done; pause ;;
+                   zivpn udp-custom badvpn-udpgw slowdns 2>/dev/null; echo done; pause ;;
             2) local f="/root/ragnar-backup-$(date +%F-%H%M).tar.gz"
                tar -czf "$f" -C "$RAGNAR_DIR" db settings.json 2>/dev/null && echo "Saved: $f"; pause ;;
             3) /usr/local/bin/ragnar-check --apply 2>/dev/null || \
@@ -346,7 +347,7 @@ tools_menu() {
 status_page() {
     print_header; bar "STATUS"
     for s in haproxy xray sing-box ragnar-wsproxy dropbear ssh zivpn udp-custom \
-             udpgw slowdns cloudflared ragnar-watchdog.timer; do
+             badvpn-udpgw slowdns cloudflared ragnar-watchdog.timer; do
         printf "${C}%-24s${W}: %s${N}\n" "$s" "$(svc_dot $s)"
     done
     echo; ss -tulnp 2>/dev/null | grep -E ':(80|443|22|109|5667|36712|53|8446)\b' || true

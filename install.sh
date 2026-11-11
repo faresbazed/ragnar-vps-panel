@@ -320,20 +320,34 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-# udpgw: apt package where it exists, else the upstream prebuilt binary
+# BadVPN udpgw (the UDP gateway UDP Custom clients use for voice/games):
+# a system badvpn-udpgw if one exists, else the upstream prebuilt BadVPN
+# binary. Installed under its canonical name and service so it shows up
+# as badvpn-udpgw everywhere (older Ragnar installs ran it as udpgw -
+# migrate the binary and retire the old unit name).
 UDPGW_BIN=$(command -v badvpn-udpgw || true)
 if [ -z "$UDPGW_BIN" ]; then
-    if wget -q https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw \
-            -O /usr/local/bin/udpgw; then
-        chmod +x /usr/local/bin/udpgw; UDPGW_BIN=/usr/local/bin/udpgw
+    if [ -x /usr/local/bin/badvpn-udpgw ]; then
+        UDPGW_BIN=/usr/local/bin/badvpn-udpgw
+    elif [ -x /usr/local/bin/udpgw ]; then
+        cp /usr/local/bin/udpgw /usr/local/bin/badvpn-udpgw
+        UDPGW_BIN=/usr/local/bin/badvpn-udpgw
+    elif wget -q https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw \
+            -O /usr/local/bin/badvpn-udpgw; then
+        chmod +x /usr/local/bin/badvpn-udpgw; UDPGW_BIN=/usr/local/bin/badvpn-udpgw
     else
-        warn "udpgw download failed - UDP gateway for SSH clients will stay offline"
-        UDPGW_BIN=/usr/local/bin/udpgw
+        warn "badvpn-udpgw download failed - UDP gateway will stay offline"
+        UDPGW_BIN=/usr/local/bin/badvpn-udpgw
     fi
 fi
-cat > /etc/systemd/system/udpgw.service <<EOF
+ln -sf "$UDPGW_BIN" /usr/local/bin/udpgw
+if [ -f /etc/systemd/system/udpgw.service ]; then
+    systemctl disable --now udpgw 2>/dev/null || true
+    rm -f /etc/systemd/system/udpgw.service
+fi
+cat > /etc/systemd/system/badvpn-udpgw.service <<EOF
 [Unit]
-Description=badvpn-udpgw for UDP Custom (Ragnar)
+Description=BadVPN udpgw - UDP gateway for UDP Custom (Ragnar)
 After=network.target
 [Service]
 ExecStart=$UDPGW_BIN --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 100
@@ -463,7 +477,7 @@ RAGNAR_DIR="$BASE" python3 "$BASE/core/ragnar.py" gen-configs || true
 cp "$BASE/xray/config.json" /usr/local/etc/xray/config.json 2>/dev/null || true
 systemctl daemon-reload
 for svc in haproxy ssh dropbear ragnar-wsproxy ragnar-landing xray sing-box zivpn \
-           udp-custom udpgw slowdns ragnar-check.timer ragnar-watchdog.timer; do
+           udp-custom badvpn-udpgw slowdns ragnar-check.timer ragnar-watchdog.timer; do
     systemctl enable --now "$svc" 2>/dev/null || warn "could not start $svc (check: systemctl status $svc)"
 done
 
@@ -479,7 +493,7 @@ cat <<EOF
     443/tcp   WSS / SSH-SSL / AnyTLS-SNI (HAProxy front door)
     53        SlowDNS (DNSTT -> SSH)
     5667/udp  ZIVPN (+ 6000-19999/udp redirected)
-    36712/udp UDP Custom (+ 20000-65535/udp redirected), udpgw 7300
+    36712/udp UDP Custom (+ 20000-65535/udp redirected), badvpn-udpgw 7300
     8446/tcp  AnyTLS fallback
 
   Telegram : @farisbazed

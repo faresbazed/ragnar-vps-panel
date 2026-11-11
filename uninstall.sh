@@ -9,7 +9,7 @@ echo "This removes Ragnar Panel services, configs and firewall rules."
 read -rp "Continue? [y/N] " a; [ "$a" = y ] || exit 0
 
 for svc in ragnar-check.timer ragnar-watchdog.timer xray sing-box zivpn \
-           udp-custom udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared; do
+           udp-custom badvpn-udpgw udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared; do
     systemctl disable --now "$svc" 2>/dev/null || true
     rm -f "/etc/systemd/system/$svc.service" "/etc/systemd/system/$svc.timer"
 done
@@ -32,7 +32,8 @@ netfilter-persistent save >/dev/null 2>&1 || true
 
 rm -f /etc/sysctl.d/99-ragnar-tuning.conf /etc/ssh/sshd_config.d/60-ragnar.conf
 rm -f /usr/local/bin/menu /usr/local/bin/ragnar /usr/local/bin/zivpn \
-      /usr/local/bin/udp-custom /usr/local/bin/sldns-server /usr/local/bin/udpgw
+      /usr/local/bin/udp-custom /usr/local/bin/sldns-server /usr/local/bin/udpgw \
+      /usr/local/bin/badvpn-udpgw
 
 if [ -f "$BASE/db/ssh.json" ]; then
     echo "Panel SSH users:"
