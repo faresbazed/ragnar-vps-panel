@@ -15,7 +15,7 @@ below, purple borders with cyan/green/yellow text.
 Fresh **Ubuntu 22.04 / 24.04** or **Debian 11 / 12**, as root:
 
 ```bash
-git clone <this-repo> ragnar-vps-panel
+git clone https://github.com/faresbazed/ragnar-vps-panel.git
 cd ragnar-vps-panel
 sudo bash install.sh
 ```
