@@ -91,6 +91,7 @@ def read_request(sock):
     Returns (path, headers, rest).
     """
     data = b""
+    chained = False
     while _split_head(data) is None:
         if len(data) > 65536:
             raise ValueError("request head too large")
@@ -104,9 +105,21 @@ def read_request(sock):
                   and b"sec-websocket-version" in head.lower())
     if not genuine_ws:
         # Drain briefly: a chained second request may arrive split.
+        # But stop the moment the final (Upgrade) head is fully in the
+        # buffer - waiting out the full window delayed the 101 and the
+        # SSH banner by ~350 ms, which strict apps / carrier hops
+        # punish by dropping the connection.
         sock.settimeout(0.35)
         try:
             while len(data) < 65536:
+                # The final head may already be fully buffered (both
+                # requests arrived in one packet) - check BEFORE
+                # blocking on recv, not only after new data lands.
+                first = _split_head(data)
+                if first is not None and len(first[1]) > 4:
+                    nxt = _split_head(first[1])
+                    if nxt is not None and b"upgrade" in nxt[0].lower():
+                        break
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
@@ -124,10 +137,11 @@ def read_request(sock):
             nxt = _split_head(rest)
             if nxt is not None and _looks_like_request(nxt[0]):
                 data = rest
+                chained = True
                 continue
             break
     path, headers = _parse_head(head)
-    return path, headers, rest
+    return path, headers, rest, chained
 
 
 def send_101(client, headers):
@@ -189,7 +203,7 @@ def connect_backend():
 def handle(client):
     backend = None
     try:
-        path, headers, rest = read_request(client)
+        path, headers, rest, chained = read_request(client)
         # Lenient by design: ANY request head gets a 101 and a tunnel.
         # Payload apps are not RFC WebSocket clients and must not be
         # rejected for a missing key / version / Upgrade header.
@@ -206,6 +220,14 @@ def handle(client):
             mode["framed"] = True
             mode_ready.set()
         elif path.startswith("/ragnar-sshws"):
+            mode["framed"] = False
+            mode_ready.set()
+        elif chained:
+            # A chained decoy payload is always a payload app speaking
+            # raw SSH - never framed. Skip the mode sniff entirely so
+            # the SSH banner is flushed the instant it arrives; some
+            # carrier middleboxes and apps drop the connection if the
+            # banner waits behind the ~300 ms sniff window.
             mode["framed"] = False
             mode_ready.set()
         stop = threading.Event()
