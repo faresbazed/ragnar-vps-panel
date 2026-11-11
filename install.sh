@@ -53,9 +53,11 @@ apt-get install -f -y >/dev/null 2>&1 || true
 grep -q " $(hostname)" /etc/hosts 2>/dev/null || echo "127.0.1.1 $(hostname)" >> /etc/hosts
 apt-get update -y
 apt-get install -y curl wget unzip tar jq python3 haproxy dropbear \
-    openssh-server vnstat iptables socat openssl cron badvpn \
+    openssh-server vnstat iptables socat openssl cron \
     certbot iproute2 net-tools procps ca-certificates gnupg \
     || die "Package installation failed - fix apt (try: sudo dpkg --configure -a) and re-run install.sh"
+# NOTE: there is no 'badvpn' package in Ubuntu 24.04 - udpgw is fetched
+# as the upstream prebuilt binary in the UDP Custom section below.
 for bin in haproxy python3 openssl; do
     command -v "$bin" >/dev/null || die "$bin is missing after apt install - aborting before half-configuring the box"
 done
@@ -312,12 +314,23 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/systemd/system/udpgw.service <<'EOF'
+# udpgw: apt package where it exists, else the upstream prebuilt binary
+UDPGW_BIN=$(command -v badvpn-udpgw || true)
+if [ -z "$UDPGW_BIN" ]; then
+    if wget -q https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw \
+            -O /usr/local/bin/udpgw; then
+        chmod +x /usr/local/bin/udpgw; UDPGW_BIN=/usr/local/bin/udpgw
+    else
+        warn "udpgw download failed - UDP gateway for SSH clients will stay offline"
+        UDPGW_BIN=/usr/local/bin/udpgw
+    fi
+fi
+cat > /etc/systemd/system/udpgw.service <<EOF
 [Unit]
 Description=badvpn-udpgw for UDP Custom (Ragnar)
 After=network.target
 [Service]
-ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 100
+ExecStart=$UDPGW_BIN --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 100
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
