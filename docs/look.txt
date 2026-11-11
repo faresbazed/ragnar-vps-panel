@@ -1,0 +1,44 @@
+   RAGNAR VPS MANAGEMENT PANEL
+   Telegram : @farisbazed   Channel : https://t.me/ragnaresim
+┌──────────────────────────────────────────────┐
+│                 SERVER INFO                  │
+└──────────────────────────────────────────────┘
+IP            : 104.29.196.209
+ISP           : Cloudflare, Inc.
+OS            : Ubuntu 24.04.5 LTS
+UPTIME        : 18 minutes
+CPU USAGE     : 10.3%
+RAM USAGE     : 7299MB / 7934MB
+DISK USAGE    : 206M/7.5G
+SERVER TIME   : 11-11-2026 14:22:16
+┌──────────────────────────────────────────────┐
+│                  BANDWIDTH                   │
+└──────────────────────────────────────────────┘
+TODAY         : n/a               MONTH         : n/a
+┌──────────────────────────────────────────────┐
+│                  USER STATS                  │
+└──────────────────────────────────────────────┘
+VMESS   : 1     VLESS   : 1     TROJAN   : 1
+SSWS    : 1     SSH     : 0     ZIVPN    : 0
+TOTAL   : 1     ONLINE  : 0
+┌──────────────────────────────────────────────┐
+│                   SERVICE                    │
+└──────────────────────────────────────────────┘
+XRAY         : ● OFFLINE  HAPROXY      : ● OFFLINE
+DROPBEAR     : ● OFFLINE  SING-BOX     : ● OFFLINE
+UDP CUSTOM   : ● OFFLINE  UDP ZIVPN    : ● OFFLINE
+SSH WS       : ● OFFLINE  WSS / SSL    : ● OFFLINE
+SLOWDNS      : ● OFFLINE  CLOUDFLARED  : ● OFFLINE
+┌──────────────────────────────────────────────┐
+│                  MAIN MENU                   │
+└──────────────────────────────────────────────┘
+〈1〉  SSH & SSL        〈9〉  UDP CUSTOM
+〈2〉  VMESS            〈10〉 SLOWDNS
+〈3〉  VLESS            〈11〉 CLOUDFLARED
+〈4〉  TROJAN           〈12〉 TOOLS
+〈5〉  SSWS             〈13〉 STATUS
+〈6〉  ANYTLS           〈14〉 CLEAR RAM
+〈7〉  XRAY (ALL)       〈15〉 REBOOT VPS
+〈8〉  UDP ZIVPN        〈16〉 UNINSTALL
+〈x〉  EXIT
+   Panel by @farisbazed - https://t.me/ragnaresim
