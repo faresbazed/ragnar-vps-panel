@@ -49,30 +49,85 @@ def recv_exact(sock, n, buf):
     return buf[:n], buf[n:]
 
 
+def _split_head(data):
+    """(head, rest, sep_len) for the first complete request head, or None."""
+    for sep in (b"\r\n\r\n", b"\n\n"):
+        if sep in data:
+            head, _, rest = data.partition(sep)
+            return head, rest, len(sep)
+    return None
+
+
+def _parse_head(head):
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    parts = lines[0].split(b" ")
+    path = parts[1].decode("latin1") if len(parts) > 1 else "/"
+    headers = {}
+    for line in lines[1:]:
+        if b":" in line:
+            k, v = line.split(b":", 1)
+            headers[k.strip().lower().decode("latin1")] = \
+                v.strip().decode("latin1")
+    return path, headers
+
+
+def _looks_like_request(head):
+    first = head.split(b"\n", 1)[0]
+    parts = first.split(b" ")
+    return len(parts) >= 3 and parts[-1].startswith(b"HTTP/")
+
+
 def read_request(sock):
-    """Read one HTTP-ish request head, tolerating CRLF or LF endings,
-    any method, and headers arriving in several packets.
-    Returns (path, headers, rest)."""
+    """Read the tunnel request, tolerating real-world payload shapes.
+
+    Payload apps often send TWO chained request heads in one stream:
+    a decoy first request (bug-host trick) and then the real upgrade
+    request - whose method may even be a made-up word. Forwarding the
+    second head to SSH as raw bytes would corrupt the SSH handshake
+    ("protocol mismatch"), so: parse every complete head in the stream,
+    discard the decoys, answer 101 to the LAST head, and treat only the
+    bytes after it as client stream data.
+
+    Returns (path, headers, rest).
+    """
     data = b""
-    while len(data) < 65536:
-        for sep in (b"\r\n\r\n", b"\n\n"):
-            if sep in data:
-                head, _, rest = data.partition(sep)
-                lines = head.replace(b"\r\n", b"\n").split(b"\n")
-                parts = lines[0].split(b" ")
-                path = parts[1].decode("latin1") if len(parts) > 1 else "/"
-                headers = {}
-                for line in lines[1:]:
-                    if b":" in line:
-                        k, v = line.split(b":", 1)
-                        headers[k.strip().lower().decode("latin1")] = \
-                            v.strip().decode("latin1")
-                return path, headers, rest
+    while _split_head(data) is None:
+        if len(data) > 65536:
+            raise ValueError("request head too large")
         chunk = sock.recv(4096)
         if not chunk:
             raise ConnectionError("closed during handshake")
         data += chunk
-    raise ValueError("request head too large")
+
+    head, rest, _ = _split_head(data)
+    genuine_ws = (b"sec-websocket-key" in head.lower()
+                  and b"sec-websocket-version" in head.lower())
+    if not genuine_ws:
+        # Drain briefly: a chained second request may arrive split.
+        sock.settimeout(0.35)
+        try:
+            while len(data) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except (socket.timeout, TimeoutError):
+            pass
+        finally:
+            sock.settimeout(None)
+        # Walk the chain: keep the last complete request head.
+        while True:
+            parts = _split_head(data)
+            if parts is None:
+                break
+            head, rest, _ = parts
+            nxt = _split_head(rest)
+            if nxt is not None and _looks_like_request(nxt[0]):
+                data = rest
+                continue
+            break
+    path, headers = _parse_head(head)
+    return path, headers, rest
 
 
 def send_101(client, headers):

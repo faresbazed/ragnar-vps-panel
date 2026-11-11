@@ -105,6 +105,43 @@ try:
     assert cli3.recv(64).startswith(b"SSH-2.0-")
     cli3.close()
     print("LF PAYLOAD MODE PASSED")
+
+    # ---- chained decoy payload (bug-host first request + fake-method
+    #      upgrade request) - the second head must NOT reach SSH --------
+    received.clear()
+    payload = (b"GET / HTTP/1.1\r\nHost: www.hse.ie \r\n\r\n"
+               b"CF-RAY / HTTP/1.1\r\nHost: spain.example.com:80\r\n"
+               b"Upgrade: websocket\r\nConnection: Keep-Alive\r\n"
+               b"User-Agent: test-agent\r\nUpgrade: websocket\r\n\r\n")
+    cli4 = socket.create_connection(("127.0.0.1", 10005), timeout=5)
+    cli4.sendall(payload)
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += cli4.recv(4096)
+    assert resp.count(b"HTTP/1.1 101") == 1 and b"101" in resp.split(b"\r\n")[0], resp
+    assert cli4.recv(64).startswith(b"SSH-2.0-")
+    cli4.sendall(b"chained-ok")
+    assert cli4.recv(64) == b"echo:chained-ok"
+    assert all(b"CF-RAY" not in r and b"hse.ie" not in r for r in received), received
+    cli4.close()
+    print("CHAINED DECOY PAYLOAD PASSED (decoy + CF-RAY heads swallowed, SSH clean)")
+
+    # ---- same payload, split across two packets -------------------------
+    received.clear()
+    cli5 = socket.create_connection(("127.0.0.1", 10005), timeout=5)
+    cli5.sendall(payload[:36])          # first request only
+    time.sleep(0.15)
+    cli5.sendall(payload[36:])          # then the upgrade request
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += cli5.recv(4096)
+    assert b"101" in resp.split(b"\r\n")[0], resp
+    assert cli5.recv(64).startswith(b"SSH-2.0-")
+    cli5.sendall(b"split-ok")
+    assert cli5.recv(64) == b"echo:split-ok"
+    assert all(b"CF-RAY" not in r for r in received), received
+    cli5.close()
+    print("SPLIT CHAINED PAYLOAD PASSED")
     print("ALL WSPROXY TESTS PASSED")
 finally:
     proc.terminate()
