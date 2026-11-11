@@ -30,6 +30,16 @@ svc_dot() {
         echo -e "${R}● OFFLINE${N}"
     fi
 }
+svc_dot_cf() { # cloudflared only runs once a tunnel token is installed
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        echo -e "${G}● ONLINE${N}"
+    elif systemctl list-unit-files cloudflared.service >/dev/null 2>&1 \
+         && systemctl list-unit-files cloudflared.service | grep -q cloudflared; then
+        echo -e "${R}● OFFLINE${N}"
+    else
+        echo -e "${Y}● NO TUNNEL${N}"
+    fi
+}
 pause() { read -rp "Press Enter to continue..." _; }
 
 human() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1 B"; }
@@ -63,8 +73,12 @@ print_header() {
     # bandwidth (vnstat when available)
     local btoday bmonth
     if command -v vnstat >/dev/null; then
-        btoday=$(vnstat --oneline 2>/dev/null | cut -d';' -f6)
-        bmonth=$(vnstat --oneline 2>/dev/null | cut -d';' -f11)
+        # --oneline fields: 6 = today total, 11 = this month total.
+        # Guard against vnstat's "No data" prose leaking into the header.
+        btoday=$(vnstat --oneline 2>/dev/null | cut -d';' -f6 | grep -E '^[0-9]' || true)
+        bmonth=$(vnstat --oneline 2>/dev/null | cut -d';' -f11 | grep -E '^[0-9]' || true)
+        [ -n "$btoday" ] || btoday=""
+        [ -n "$bmonth" ] || bmonth=""
     fi
     bar "BANDWIDTH"
     printf "${C}%-14s${W}: ${G}%-18s${C}%-14s${W}: ${G}%s${N}\n" \
@@ -86,7 +100,7 @@ print_header() {
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "DROPBEAR" "$(svc_dot dropbear)" "SING-BOX" "$(svc_dot sing-box)"
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "UDP CUSTOM" "$(svc_dot udp-custom)" "UDP ZIVPN" "$(svc_dot zivpn)"
     printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SSH WS" "$(svc_dot ragnar-wsproxy)" "WSS / SSL" "$(svc_dot haproxy)"
-    printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SLOWDNS" "$(svc_dot slowdns)" "CLOUDFLARED" "$(svc_dot cloudflared)"
+    printf "${C}%-13s${W}: %-22s${C}%-13s${W}: %s${N}\n" "SLOWDNS" "$(svc_dot slowdns)" "CLOUDFLARED" "$(svc_dot_cf)"
 }
 
 main_menu() {

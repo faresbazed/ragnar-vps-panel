@@ -248,23 +248,29 @@ iptables -t nat -C PREROUTING -p tcp --dport 8446 -j REDIRECT --to-ports 10006 2
 # UDP ZIVPN (binary: zahidbd2/udp-zivpn) - optimized
 # ---------------------------------------------------------------------
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ZARCH=amd64 || ZARCH=arm64
-ZURL=$(curl -s --max-time 15 https://api.github.com/repos/zahidbd2/udp-zivpn/releases/latest \
-    | grep -o "https://[^\"]*linux-${ZARCH}[^\"]*" | head -1)
-if [ -n "$ZURL" ] && wget -q "$ZURL" -O /usr/local/bin/ragnar-zivpn; then
-    chmod +x /usr/local/bin/ragnar-zivpn
+# Pinned upstream release (zahidbd2/udp-zivpn) - the binary is invoked as
+# "zivpn server -c <config>", exactly as upstream's own installer does.
+ZURL="https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-${ZARCH}"
+if wget -q "$ZURL" -O /usr/local/bin/zivpn; then
+    chmod +x /usr/local/bin/zivpn
 else
-    warn "ZIVPN binary download failed - service created but disabled until the binary exists at /usr/local/bin/ragnar-zivpn"
+    warn "ZIVPN binary download failed - service created but it cannot start until /usr/local/bin/zivpn exists"
 fi
 cat > /etc/systemd/system/zivpn.service <<'EOF'
 [Unit]
 Description=UDP ZIVPN (Ragnar)
 After=network.target
 [Service]
+Type=simple
+User=root
 WorkingDirectory=/etc/ragnar/zivpn
-ExecStart=/usr/local/bin/ragnar-zivpn
+ExecStart=/usr/local/bin/zivpn server -c /etc/ragnar/zivpn/config.json
 Restart=always
-RestartSec=2
+RestartSec=3
 LimitNOFILE=1048576
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -348,12 +354,20 @@ iptables -t nat -C POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP
 # ---------------------------------------------------------------------
 # SlowDNS (DNSTT/SLDNS build) - SSH over DNS on 53
 # ---------------------------------------------------------------------
-if wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/master/slowdns/linux/slowdns \
-        -O /usr/local/bin/slowdns; then
-    chmod +x /usr/local/bin/slowdns
+if wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-server \
+        -O /usr/local/bin/sldns-server; then
+    chmod +x /usr/local/bin/sldns-server
     if [ ! -f "$BASE/slowdns/server.key" ]; then
-        (cd "$BASE/slowdns" && /usr/local/bin/slowdns -gen-key \
-            -privkey-file server.key -pubkey-file server.pub)
+        (cd "$BASE/slowdns" && /usr/local/bin/sldns-server -gen-key \
+            -privkey-file server.key -pubkey-file server.pub 2>/dev/null)
+    fi
+    # Fallback: upstream's shared keypair (public, used by every SL install)
+    if [ ! -s "$BASE/slowdns/server.key" ]; then
+        wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/server.key \
+            -O "$BASE/slowdns/server.key"
+        wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/server.pub \
+            -O "$BASE/slowdns/server.pub"
+        warn "SlowDNS: own keypair generation failed - using upstream's shared keypair"
     fi
     PUBKEY=$(cat "$BASE/slowdns/server.pub" 2>/dev/null || true)
     python3 - "$PUBKEY" <<'PY'
@@ -371,17 +385,16 @@ cat > /etc/systemd/system/slowdns.service <<EOF
 Description=SlowDNS DNSTT (Ragnar)
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/slowdns -udp :5300 -tcp :5300 -privkey-file $BASE/slowdns/server.key ${NS:-ns.invalid} 127.0.0.1:22
+ExecStart=/usr/local/bin/sldns-server -udp :5300 -privkey-file $BASE/slowdns/server.key ${NS:-ns.invalid} 127.0.0.1:22
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-for proto in udp tcp; do
-    iptables -t nat -C PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || \
-        iptables -t nat -A PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5300
-done
+# SlowDNS (dnstt) is UDP-only - redirect UDP 53 onto the listener.
+iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || \
+    iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 
 # ---------------------------------------------------------------------
 # Cloudflared
