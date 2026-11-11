@@ -257,15 +257,21 @@ def handle(client):
                             if not mode_ready.wait(0.3):
                                 mode["framed"] = False
                                 mode_ready.set()
-                        if mode["framed"]:
+                            # data is already queued in pending_banner:
+                            # flush the queue ONLY. (An earlier version
+                            # also sent data again below the flush, so a
+                            # banner-first client received the SSH banner
+                            # and KEXINIT twice and the handshake desynced
+                            # into a 10 s timeout.)
                             for chunk in pending_banner:
-                                send_frame(client, chunk)
+                                if mode["framed"]:
+                                    send_frame(client, chunk)
+                                else:
+                                    client.sendall(chunk)
                             pending_banner.clear()
+                        elif mode["framed"]:
                             send_frame(client, data)
                         else:
-                            for chunk in pending_banner:
-                                client.sendall(chunk)
-                            pending_banner.clear()
                             client.sendall(data)
                     elif pending_banner and mode["framed"] is not None:
                         flush = pending_banner.copy()

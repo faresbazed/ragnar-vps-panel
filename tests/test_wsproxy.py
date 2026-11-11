@@ -142,6 +142,37 @@ try:
     assert all(b"CF-RAY" not in r for r in received), received
     cli5.close()
     print("SPLIT CHAINED PAYLOAD PASSED")
+
+    # ---- auto mode, banner-first client (the iOS tunnel-app shape) -----
+    # A single non-forced request: the proxy must sniff the mode, which
+    # means the SSH banner arrives while the mode is still undecided.
+    # Regression: the first backend chunk was once flushed from the
+    # pending queue AND sent again, so the client received banner+KEX
+    # twice and the SSH handshake desynced (10 s timeout in the app).
+    received.clear()
+    cli6 = socket.create_connection(("127.0.0.1", 10005), timeout=5)
+    cli6.sendall(b"CF-RAY / HTTP/1.1\r\nHost: spain.example.com:80\r\n"
+                 b"Upgrade: websocket\r\nConnection: Keep-Alive\r\n\r\n")
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += cli6.recv(4096)
+    assert b"101" in resp.split(b"\r\n")[0], resp
+    cli6.settimeout(1.2)
+    body = b""
+    try:
+        while True:
+            d = cli6.recv(4096)
+            if not d:
+                break
+            body += d
+    except socket.timeout:
+        pass
+    assert body == b"SSH-2.0-FakeSSH\r\n", f"banner must arrive exactly once, got {body!r}"
+    cli6.settimeout(5)
+    cli6.sendall(b"SSH-2.0-ClientProbe\r\n")
+    assert cli6.recv(64) == b"echo:SSH-2.0-ClientProbe\r\n"
+    cli6.close()
+    print("AUTO MODE BANNER-FIRST PASSED (banner exactly once, stream in sync)")
     print("ALL WSPROXY TESTS PASSED")
 finally:
     proc.terminate()
