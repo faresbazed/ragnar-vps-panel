@@ -99,6 +99,14 @@ conntrack headroom, `LimitNOFILE` everywhere.
   on 7300, SSH users mirrored as auth entries.
 - **SlowDNS** (DNSTT) — UDP/TCP 53 redirected to dnstt on 5300 →
   SSH 22; keypair generated at install, public key shown in the menu.
+  **KCP Turbo Speed Patch included:** the installer also builds a
+  patched dnstt-server from upstream source (`configs/kcp-turbo.patch`)
+  with aggressive KCP settings — `SetNoDelay(1, 20, 2, 1)` and
+  `SetWindowSize(8192, 8192)` instead of stock nodelay-off and window
+  64 — and runs SlowDNS on it by default. It is wire-compatible with
+  unmodified dnstt clients and apps (nodelay is a local scheduling
+  choice; the window is advertised in the KCP header). Toggle it in
+  the SlowDNS menu (stock binary ⇄ turbo binary).
 
 ### Panel
 - Header: VPS IP, ISP, OS, uptime, CPU/RAM/disk, server time, bandwidth,

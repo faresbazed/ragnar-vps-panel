@@ -87,7 +87,7 @@ print_header() {
     local stats total online
     stats=$(python3 "$CORE" stats 2>/dev/null)
     get() { echo "$stats" | grep -o "\"$1\": [0-9]*" | grep -o '[0-9]*$'; }
-    total=$(get total); online=$(ss -tn state established 2>/dev/null | tail -n +2 | wc -l)
+    total=$(get total); online=$(python3 "$CORE" online 2>/dev/null | grep -o '"online": [0-9]*' | grep -o '[0-9]*$')
     bar "USER STATS"
     printf "${C}%-8s${W}: ${G}%-6s${C}%-8s${W}: ${G}%-6s${C}%-9s${W}: ${G}%s${N}\n" \
         "VMESS" "$(get vmess)" "VLESS" "$(get vless)" "TROJAN" "$(get trojan)"
@@ -264,10 +264,33 @@ slowdns_menu() {
         echo "Nameserver : ${ns:-not set}"
         echo "Public key : ${pub:-not set}"
         echo "Endpoint   : UDP/TCP 53 -> dnstt 127.0.0.1:5300 -> SSH 22"
-        echo "1) Restart    2) Set nameserver    0) Back"
+        local kcp kcp_txt
+        kcp=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('slowdns_kcp',False))" 2>/dev/null)
+        if [ ! -x /usr/local/bin/sldns-server-kcp ]; then kcp_txt="NOT INSTALLED (re-run install.sh)"
+        elif [ "$kcp" = "True" ]; then kcp_txt="ON (turbo binary, KCP nodelay + window 8192)"
+        else kcp_txt="OFF (stock binary)"; fi
+        echo "KCP Turbo  : $kcp_txt"
+        echo "1) Restart    2) Set nameserver    3) Toggle KCP Turbo    0) Back"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart slowdns; echo restarted; pause ;;
+            3) if [ ! -x /usr/local/bin/sldns-server-kcp ] && [ "$kcp" != "True" ]; then
+                   echo "Turbo binary not installed - re-run install.sh to build it"; pause
+               else
+                   local newbin newflag
+                   if [ "$kcp" = "True" ]; then newbin=/usr/local/bin/sldns-server; newflag=False
+                   else newbin=/usr/local/bin/sldns-server-kcp; newflag=True; fi
+                   sed -i "s|ExecStart=/usr/local/bin/sldns-server[a-z-]*|ExecStart=$newbin|" /etc/systemd/system/slowdns.service
+                   python3 - "$newflag" <<'PY'
+import json,sys,os
+p=os.path.join(os.environ.get("RAGNAR_DIR","/etc/ragnar"),"settings.json")
+s=json.load(open(p)) if os.path.exists(p) else {}
+s["slowdns_kcp"]=sys.argv[1]=="True"
+json.dump(s,open(p,"w"),indent=2)
+PY
+                   systemctl daemon-reload; systemctl restart slowdns
+                   echo "KCP Turbo now: $newflag (binary: $newbin)"; pause
+               fi ;;
             2) read -rp "Nameserver (e.g. ns.yourdomain.com): " v
                python3 - "$v" <<'PY'
 import json,sys,os

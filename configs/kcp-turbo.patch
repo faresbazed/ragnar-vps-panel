@@ -1,0 +1,26 @@
+--- a/dnstt-server/main.go
++++ b/dnstt-server/main.go
+@@ -293,13 +293,18 @@
+ 		conn.SetStreamMode(true)
+ 		// Disable the dynamic congestion window (limit only by the
+ 		// maximum of local and remote static windows).
++		// KCP Turbo Speed Patch: aggressive nodelay + fast resend and a
++		// much larger static window than stock dnstt (QueueSize/2).
++		// Wire-compatible with unmodified dnstt clients: nodelay is a
++		// local scheduling choice and the window is advertised in the
++		// KCP header, so stock apps keep working.
+ 		conn.SetNoDelay(
+-			0, // default nodelay
+-			0, // default interval
+-			0, // default resend
+-			1, // nc=1 => congestion window off
++			1,  // nodelay on
++			20, // 20 ms update interval
++			2,  // fast resend after 2 skipped ACKs
++			1,  // nc=1 => congestion window off
+ 		)
+-		conn.SetWindowSize(turbotunnel.QueueSize/2, turbotunnel.QueueSize/2)
++		conn.SetWindowSize(8*1024, 8*1024)
+ 		if rc := conn.SetMtu(mtu); !rc {
+ 			panic(rc)
+ 		}

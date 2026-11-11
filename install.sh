@@ -394,12 +394,47 @@ PY
 else
     warn "SlowDNS binary download failed - module skipped"
 fi
+# ---------------------------------------------------------------------
+# SlowDNS KCP Turbo Speed Patch: a dnstt-server built from upstream
+# source with aggressive KCP settings (configs/kcp-turbo.patch:
+# SetNoDelay(1, 20, 2, 1) and SetWindowSize(8192, 8192) instead of the
+# stock nodelay-off and window 64). Wire-compatible with stock dnstt
+# clients and apps - only the server binary changes. Built here rather
+# than shipped because the panel repo carries text files only.
+# ---------------------------------------------------------------------
+SLOWDNS_BIN=/usr/local/bin/sldns-server
+if [ ! -x /usr/local/bin/sldns-server-kcp ]; then
+    log "Building SlowDNS KCP Turbo binary from dnstt source + patch..."
+    if ! command -v go >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 || ! command -v patch >/dev/null 2>&1; then
+        apt-get install -y -q git golang-go patch >/dev/null 2>&1 || true
+    fi
+    KCP_TMP=$(mktemp -d)
+    if command -v go >/dev/null 2>&1 && \
+       git clone -q --depth 1 https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" 2>/dev/null && \
+       (cd "$KCP_TMP/dnstt" && patch -p1 -s < "$SRC/configs/kcp-turbo.patch" && \
+        cd dnstt-server && CGO_ENABLED=0 go build -trimpath -o /usr/local/bin/sldns-server-kcp .); then
+        log "KCP Turbo binary built: /usr/local/bin/sldns-server-kcp"
+    else
+        warn "KCP Turbo build failed - stock SlowDNS only (menu can retry after install)"
+    fi
+    rm -rf "$KCP_TMP"
+fi
+if [ -x /usr/local/bin/sldns-server-kcp ]; then
+    SLOWDNS_BIN=/usr/local/bin/sldns-server-kcp
+fi
+python3 - "$SLOWDNS_BIN" <<'PY'
+import json, os, sys
+p = "/etc/ragnar/settings.json"
+s = json.load(open(p)) if os.path.exists(p) else {}
+s["slowdns_kcp"] = sys.argv[1].endswith("sldns-server-kcp")
+json.dump(s, open(p, "w"), indent=2)
+PY
 cat > /etc/systemd/system/slowdns.service <<EOF
 [Unit]
 Description=SlowDNS DNSTT (Ragnar)
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/sldns-server -udp :5300 -privkey-file $BASE/slowdns/server.key ${NS:-ns.invalid} 127.0.0.1:22
+ExecStart=$SLOWDNS_BIN -udp :5300 -privkey-file $BASE/slowdns/server.key ${NS:-ns.invalid} 127.0.0.1:22
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
