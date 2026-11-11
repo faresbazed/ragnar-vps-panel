@@ -45,10 +45,21 @@ log "Installing $PANEL for host $HOST_FOR_LINKS (IP $PUBIP)"
 # Packages + tuning
 # ---------------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
+# Repair a half-finished dpkg state first (a common fresh-VPS landmine:
+# every apt install then fails with "dpkg was interrupted").
+dpkg --configure -a 2>/dev/null || true
+apt-get install -f -y >/dev/null 2>&1 || true
+# Silence "sudo: unable to resolve host" on hosts without a hosts entry
+grep -q " $(hostname)" /etc/hosts 2>/dev/null || echo "127.0.1.1 $(hostname)" >> /etc/hosts
 apt-get update -y
 apt-get install -y curl wget unzip tar jq python3 haproxy dropbear \
     openssh-server vnstat iptables socat openssl cron badvpn \
-    certbot iproute2 net-tools procps ca-certificates gnupg
+    certbot iproute2 net-tools procps ca-certificates gnupg \
+    || die "Package installation failed - fix apt (try: sudo dpkg --configure -a) and re-run install.sh"
+for bin in haproxy python3 openssl; do
+    command -v "$bin" >/dev/null || die "$bin is missing after apt install - aborting before half-configuring the box"
+done
+mkdir -p /etc/haproxy
 
 install -m 644 "$SRC/configs/99-ragnar-tuning.conf" /etc/sysctl.d/99-ragnar-tuning.conf
 sysctl --system >/dev/null 2>&1 || true
@@ -88,11 +99,22 @@ CERT_OK=0
 if [ -n "$DOMAIN" ]; then
     DIP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1)
     if [ "$DIP" = "$PUBIP" ]; then
+        # Preferred: one cert covering the domain AND anytls.<domain>.
+        # If anytls.<domain> has no DNS record yet the whole order fails,
+        # so fall back to a domain-only cert instead of self-signed.
         if certbot certonly --standalone --non-interactive --agree-tos \
                 -m "admin@$DOMAIN" -d "$DOMAIN" -d "anytls.$DOMAIN" 2>/dev/null; then
+            CERT_OK=1; log "Let's Encrypt certificate installed (domain + anytls subdomain)"
+        elif certbot certonly --standalone --non-interactive --agree-tos \
+                -m "admin@$DOMAIN" -d "$DOMAIN" 2>/dev/null; then
+            CERT_OK=1
+            warn "Let's Encrypt certificate installed for $DOMAIN only."
+            warn "Add an A record  anytls.$DOMAIN -> $PUBIP  and re-run install.sh"
+            warn "so the AnyTLS name is covered too (AnyTLS needs that record anyway)."
+        fi
+        if [ "$CERT_OK" = 1 ]; then
             cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$BASE/certs/fullchain.pem"
             cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem"   "$BASE/certs/privkey.pem"
-            CERT_OK=1; log "Let's Encrypt certificate installed"
         fi
     fi
 fi
@@ -203,12 +225,13 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/systemd/system/sing-box.service <<'EOF'
+SINGBOX_BIN=$(command -v sing-box || echo /usr/local/bin/sing-box)
+cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box AnyTLS (Ragnar)
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/ragnar/sing-box/config.json
+ExecStart=$SINGBOX_BIN run -c /etc/ragnar/sing-box/config.json
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

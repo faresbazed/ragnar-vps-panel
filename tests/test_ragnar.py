@@ -77,6 +77,8 @@ check("links: cloudflare variants", "cdn.example.com" in flat)
 check("links: vmess is base64 json", _vmess_ok(links))
 check("links: trojan + ssws + anytls",
       "trojan://" in flat and "ss://" in flat and "anytls://" in flat)
+check("links: anytls 443 uses anytls. SNI for HAProxy routing",
+      "sni=anytls.vpn.example.com" in flat)
 check("links: paths", "/ragnar-vless" in flat
       and "/ragnar-trojan" in flat and "/ragnar-ssws" in flat)
 

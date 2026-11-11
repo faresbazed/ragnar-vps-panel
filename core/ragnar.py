@@ -445,12 +445,16 @@ def links_for(name):
         ssws += f"#{tag}-SSWS"
         out[label] = {"VLESS": vless, "VMESS": vmess, "TROJAN": trojan, "SSWS": ssws}
     # AnyTLS: raw TLS, cannot ride Cloudflare's HTTP proxy - direct only.
+    # The 443 link MUST carry SNI anytls.<domain>: HAProxy's stage-1 SNI
+    # router is what steers it (passthrough) to sing-box instead of the
+    # TLS-termination stage. Needs an A record for anytls.<domain>.
     host = s["domain"] or s["host"]
+    anytls_sni = f"anytls.{s['domain']}" if s["domain"] else host
     out["AnyTLS · port 443 (direct, SNI routed)"] = {
         "ANYTLS": (f"anytls://{u['password']}@{host}:443?"
-                   f"security=tls&sni={host}&fp=chrome&alpn=h2#{ 'Ragnar-' + name }-ANYTLS"),
+                   f"security=tls&sni={anytls_sni}&fp=chrome&alpn=h2#Ragnar-{name}-ANYTLS"),
     }
-    sni_host = f"anytls.{s['domain']}" if s["domain"] else host
+    sni_host = anytls_sni
     out["AnyTLS · port 8446 (direct fallback)"] = {
         "ANYTLS": (f"anytls://{u['password']}@{host}:8446?"
                    f"security=tls&sni={sni_host}&fp=chrome&alpn=h2#Ragnar-{name}-ANYTLS-8446"),
