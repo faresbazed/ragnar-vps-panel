@@ -14,15 +14,28 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 
 # --- fake SSH backend on 127.0.0.1:109 (dropbear's port) ---------------
 received = []
+def _serve(conn):
+    try:
+        conn.sendall(b"SSH-2.0-FakeSSH\r\n")
+        data = conn.recv(4096)
+        if data:
+            received.append(data)
+            conn.sendall(b"echo:" + data)
+        time.sleep(0.3)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
 def fake_ssh():
     srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 109)); srv.listen(1)
-    conn, _ = srv.accept()
-    conn.sendall(b"SSH-2.0-FakeSSH\r\n")
-    data = conn.recv(4096)
-    received.append(data)
-    conn.sendall(b"echo:" + data)
-    time.sleep(0.3); conn.close(); srv.close()
+    srv.bind(("127.0.0.1", 109)); srv.listen(5)
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        threading.Thread(target=_serve, args=(conn,), daemon=True).start()
 
 t = threading.Thread(target=fake_ssh, daemon=True); t.start()
 time.sleep(0.2)
@@ -34,7 +47,7 @@ try:
     time.sleep(0.6)
     cli = socket.create_connection(("127.0.0.1", 10005), timeout=5)
     key = base64.b64encode(os.urandom(16)).decode()
-    cli.sendall((f"GET /ragnar-sshws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+    cli.sendall((f"GET /ragnar-sshwsf HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
                  f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
                  f"Sec-WebSocket-Version: 13\r\n\r\n").encode())
     resp = b""
@@ -66,6 +79,32 @@ try:
     echo = read_frame(cli)
     assert echo == b"echo:" + payload, echo
     assert received and received[0] == payload, received
-    print("WSPROXY TEST PASSED (handshake, banner, masked frame round-trip)")
+    print("FRAMED MODE PASSED (handshake, banner, masked frame round-trip)")
+
+    # ---- payload-app mode: no Sec-WebSocket-Key, raw bytes after 101 --
+    cli2 = socket.create_connection(("127.0.0.1", 10005), timeout=5)
+    cli2.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\n"
+                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += cli2.recv(4096)
+    assert b"101" in resp.split(b"\r\n")[0], resp
+    banner = cli2.recv(64)
+    assert banner.startswith(b"SSH-2.0-"), banner          # RAW, not framed
+    cli2.sendall(b"raw-ssh-bytes")                          # RAW client data
+    echo = cli2.recv(64)
+    assert echo == b"echo:raw-ssh-bytes", echo
+    cli2.close()
+    print("RAW PAYLOAD MODE PASSED (no key, 101, raw banner + raw echo)")
+
+    # ---- payload with LF-only line endings ------------------------------
+    cli3 = socket.create_connection(("127.0.0.1", 10005), timeout=5)
+    cli3.sendall(b"GET / HTTP/1.0\nHost: x\nUpgrade: websocket\n\n")
+    resp = cli3.recv(4096)
+    assert b"101" in resp.split(b"\n")[0], resp
+    assert cli3.recv(64).startswith(b"SSH-2.0-")
+    cli3.close()
+    print("LF PAYLOAD MODE PASSED")
+    print("ALL WSPROXY TESTS PASSED")
 finally:
     proc.terminate()

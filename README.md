@@ -58,6 +58,14 @@ SSH-WS proxy 10005, Xray 10001–10004, AnyTLS 10006 (plus 8446 fallback).
 - **Per-user IP limit** (extra source IPs get their sessions kicked)
 - Expiry in days, enable/disable, password change
 - User info sheet: host, ports, WS path, SNI, SlowDNS NS + public key
+- **Two SSH-WS flavours, both on 80/443** — the proxy is hybrid:
+  - `/ragnar-sshws` — **payload/raw mode** for NPV Tunnel, HTTP Custom,
+    HA Tunnel etc. *Any* payload works: the proxy answers 101 to any
+    request head (no Sec-WebSocket-Key required, any method, LF or CRLF)
+    and then pipes raw SSH bytes, exactly like the classic panel proxies.
+  - `/ragnar-sshwsf` — **true WebSocket framing** for NapsternetV-style
+    WS clients (proper handshake, masked binary frames).
+  - Any other path auto-detects from the first bytes the client sends.
 
 ### Xray — all protocols from one user
 Creating one Xray user generates **all of these at the same time**, each

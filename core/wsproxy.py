@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """
-Ragnar SSH WebSocket proxy (stdlib only).
+Ragnar SSH WebSocket proxy (stdlib only) - hybrid edition.
 
-Listens on 127.0.0.1:10005 and bridges WebSocket binary frames to the local
-SSH backend (Dropbear 127.0.0.1:109, falling back to OpenSSH 127.0.0.1:22).
+Listens on 127.0.0.1:10005 and bridges to the local SSH backend
+(Dropbear 127.0.0.1:109, falling back to OpenSSH 127.0.0.1:22).
 HAProxy terminates TLS in front of it, so the same backend serves both
 WS (port 80) and WSS (port 443) on path /ragnar-sshws.
 
-Clients: HTTP Custom, NapsternetV, ZIVPN Tunnel, HA Tunnel Plus, etc.
+Why "hybrid": SSH apps come in two families and this proxy serves both.
+
+  1. Payload apps (NPV Tunnel, HTTP Custom, HA Tunnel Plus, ZIVPN...).
+     They send a hand-written HTTP payload ("GET ... Upgrade: websocket",
+     often WITHOUT Sec-WebSocket-Key, sometimes with another method, LF
+     line endings, or the request split across packets), expect a
+     "101 Switching Protocols" reply, and then speak RAW SSH bytes -
+     no WebSocket framing at all. Any payload works.
+
+  2. True WebSocket clients (NapsternetV WS mode, v2ray-style libs).
+     Proper handshake with Sec-WebSocket-Key, then masked binary frames.
+
+After the 101 reply the proxy sniffs the first client bytes: a masked
+frame (0x8x + mask bit) selects framed mode, anything else (e.g. the
+"SSH-2.0-..." client version string) selects raw mode. The SSH banner
+is buffered for up to 300 ms while the mode is undecided.
 """
 import base64
 import hashlib
@@ -22,63 +37,72 @@ LISTEN = ("127.0.0.1", int(os.environ.get("RAGNAR_WSPORT", "10005")))
 BACKENDS = [("127.0.0.1", 109), ("127.0.0.1", 22)]  # dropbear, then openssh
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_FRAME = 1 << 20
+FRAME_FIRST_BYTES = {0x80, 0x81, 0x82, 0x88, 0x89, 0x8A}
 
 
-def recv_exact(sock, n):
-    buf = b""
+def recv_exact(sock, n, buf):
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise ConnectionError("closed")
         buf += chunk
-    return buf
+    return buf[:n], buf[n:]
 
 
-def read_http_headers(sock):
+def read_request(sock):
+    """Read one HTTP-ish request head, tolerating CRLF or LF endings,
+    any method, and headers arriving in several packets.
+    Returns (path, headers, rest)."""
     data = b""
-    while b"\r\n\r\n" not in data and len(data) < 65536:
+    while len(data) < 65536:
+        for sep in (b"\r\n\r\n", b"\n\n"):
+            if sep in data:
+                head, _, rest = data.partition(sep)
+                lines = head.replace(b"\r\n", b"\n").split(b"\n")
+                parts = lines[0].split(b" ")
+                path = parts[1].decode("latin1") if len(parts) > 1 else "/"
+                headers = {}
+                for line in lines[1:]:
+                    if b":" in line:
+                        k, v = line.split(b":", 1)
+                        headers[k.strip().lower().decode("latin1")] = \
+                            v.strip().decode("latin1")
+                return path, headers, rest
         chunk = sock.recv(4096)
         if not chunk:
             raise ConnectionError("closed during handshake")
         data += chunk
-    head, _, rest = data.partition(b"\r\n\r\n")
-    headers = {}
-    for line in head.decode("latin1").split("\r\n")[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            headers[k.strip().lower()] = v.strip()
-    return headers, rest
+    raise ValueError("request head too large")
 
 
-def ws_accept(key):
-    return base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+def send_101(client, headers):
+    lines = ["HTTP/1.1 101 Switching Protocols",
+             "Upgrade: websocket", "Connection: Upgrade"]
+    key = headers.get("sec-websocket-key")
+    if key:
+        accept = base64.b64encode(
+            hashlib.sha1((key + GUID).encode()).digest()).decode()
+        lines.append(f"Sec-WebSocket-Accept: {accept}")
+    client.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
 
 
 def read_frame(sock, buf):
-    """Return (opcode, payload, leftover_buffer). Client frames are masked."""
-    def take(n, b):
-        while len(b) < n:
-            chunk = sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("closed")
-            b += chunk
-        return b[:n], b[n:]
-    hdr, buf = take(2, buf)
+    hdr, buf = recv_exact(sock, 2, buf)
     opcode = hdr[0] & 0x0F
     masked = hdr[1] & 0x80
     length = hdr[1] & 0x7F
     if length == 126:
-        ext, buf = take(2, buf)
+        ext, buf = recv_exact(sock, 2, buf)
         length = struct.unpack(">H", ext)[0]
     elif length == 127:
-        ext, buf = take(8, buf)
+        ext, buf = recv_exact(sock, 8, buf)
         length = struct.unpack(">Q", ext)[0]
     if length > MAX_FRAME:
         raise ValueError("frame too large")
     mask = b""
     if masked:
-        mask, buf = take(4, buf)
-    payload, buf = take(length, buf)
+        mask, buf = recv_exact(sock, 4, buf)
+    payload, buf = recv_exact(sock, length, buf)
     if masked:
         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
     return opcode, payload, buf
@@ -110,29 +134,68 @@ def connect_backend():
 def handle(client):
     backend = None
     try:
-        headers, rest = read_http_headers(client)
-        key = headers.get("sec-websocket-key")
-        if not key:
-            client.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-            return
-        client.sendall((
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {ws_accept(key)}\r\n\r\n").encode())
+        path, headers, rest = read_request(client)
+        # Lenient by design: ANY request head gets a 101 and a tunnel.
+        # Payload apps are not RFC WebSocket clients and must not be
+        # rejected for a missing key / version / Upgrade header.
+        send_101(client, headers)
         backend = connect_backend()
 
+        mode = {"framed": None}          # None=undecided, True, False(raw)
+        mode_ready = threading.Event()
+        # The path can force the mode deterministically:
+        #   /ragnar-sshws  -> raw payload mode (NPV Tunnel, HTTP Custom)
+        #   /ragnar-sshwsf -> true WebSocket framing (NapsternetV WS mode)
+        # Any other path: sniff the first client bytes, default raw.
+        if path.startswith("/ragnar-sshwsf"):
+            mode["framed"] = True
+            mode_ready.set()
+        elif path.startswith("/ragnar-sshws"):
+            mode["framed"] = False
+            mode_ready.set()
         stop = threading.Event()
+        pending_banner = []
+
+        def decide(first_bytes):
+            if mode["framed"] is None:
+                framed = (len(first_bytes) >= 2
+                          and first_bytes[0] in FRAME_FIRST_BYTES
+                          and bool(first_bytes[1] & 0x80))
+                mode["framed"] = framed
+                mode_ready.set()
 
         def backend_to_client():
             try:
                 while not stop.is_set():
-                    r, _, _ = select.select([backend], [], [], 30)
-                    if not r:
-                        continue
-                    data = backend.recv(65536)
-                    if not data:
-                        break
-                    send_frame(client, data, 0x2)
+                    r, _, _ = select.select([backend], [], [], 0.05)
+                    if backend in r:
+                        data = backend.recv(65536)
+                        if not data:
+                            break
+                        if mode["framed"] is None:
+                            pending_banner.append(data)
+                            # give the client 300 ms to reveal its mode
+                            if not mode_ready.wait(0.3):
+                                mode["framed"] = False
+                                mode_ready.set()
+                        if mode["framed"]:
+                            for chunk in pending_banner:
+                                send_frame(client, chunk)
+                            pending_banner.clear()
+                            send_frame(client, data)
+                        else:
+                            for chunk in pending_banner:
+                                client.sendall(chunk)
+                            pending_banner.clear()
+                            client.sendall(data)
+                    elif pending_banner and mode["framed"] is not None:
+                        flush = pending_banner.copy()
+                        pending_banner.clear()
+                        for chunk in flush:
+                            if mode["framed"]:
+                                send_frame(client, chunk)
+                            else:
+                                client.sendall(chunk)
             except OSError:
                 pass
             finally:
@@ -140,16 +203,36 @@ def handle(client):
 
         t = threading.Thread(target=backend_to_client, daemon=True)
         t.start()
+
         buf = rest
+        if buf:
+            decide(buf)
+            if not mode["framed"]:
+                backend.sendall(buf)
+                buf = b""
         while not stop.is_set():
-            opcode, payload, buf = read_frame(client, buf)
-            if opcode == 0x8:      # close
-                break
-            if opcode == 0x9:      # ping -> pong
-                send_frame(client, payload, 0xA)
-                continue
-            if opcode in (0x1, 0x2, 0x0) and payload:
-                backend.sendall(payload)
+            if mode["framed"]:
+                opcode, payload, buf = read_frame(client, buf)
+                if opcode == 0x8:
+                    break
+                if opcode == 0x9:
+                    send_frame(client, payload, 0xA)
+                    continue
+                if opcode in (0x0, 0x1, 0x2) and payload:
+                    backend.sendall(payload)
+            else:
+                r, _, _ = select.select([client], [], [], 30)
+                if client not in r:
+                    continue
+                data = client.recv(65536)
+                if not data:
+                    break
+                if mode["framed"] is None:
+                    decide(data)
+                    if mode["framed"]:
+                        buf = data       # re-parse as frames
+                        continue
+                backend.sendall(data)
     except (ConnectionError, OSError, ValueError):
         pass
     finally:
@@ -166,7 +249,7 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(LISTEN)
     srv.listen(128)
-    print(f"ragnar wsproxy listening on {LISTEN[0]}:{LISTEN[1]}", flush=True)
+    print(f"ragnar wsproxy (hybrid) listening on {LISTEN[0]}:{LISTEN[1]}", flush=True)
     while True:
         client, _ = srv.accept()
         threading.Thread(target=handle, args=(client,), daemon=True).start()
