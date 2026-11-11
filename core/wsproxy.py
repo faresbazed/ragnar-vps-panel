@@ -222,6 +222,8 @@ def handle(client):
         def backend_to_client():
             try:
                 while not stop.is_set():
+                    if backend.fileno() < 0:
+                        break
                     r, _, _ = select.select([backend], [], [], 0.05)
                     if backend in r:
                         data = backend.recv(65536)
@@ -251,7 +253,10 @@ def handle(client):
                                 send_frame(client, chunk)
                             else:
                                 client.sendall(chunk)
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: the main thread closed the backend socket
+                # (fd becomes -1) while we were selecting on it - that
+                # is a normal teardown race, not an error.
                 pass
             finally:
                 stop.set()
