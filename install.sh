@@ -61,6 +61,24 @@ apt-get install -y curl wget unzip tar jq python3 haproxy dropbear \
 for bin in haproxy python3 openssl; do
     command -v "$bin" >/dev/null || die "$bin is missing after apt install - aborting before half-configuring the box"
 done
+# Download a binary atomically: fetch to a temp file in the same
+# directory, then rename into place. A plain "wget -O <dest>" truncates
+# the target and fails with "Text file busy" whenever the old binary is
+# still running - the classic re-run-the-installer-over-a-live-panel
+# failure that used to skip udp-custom and SlowDNS entirely.
+fetch_bin() {
+    local url="$1" dest="$2" tmp="${2}.tmp.$$"
+    if wget -q "$url" -O "$tmp"; then
+        chmod +x "$tmp" && mv -f "$tmp" "$dest"
+    else
+        rm -f "$tmp"; return 1
+    fi
+}
+# Re-installing over a live panel: stop the services whose binaries are
+# about to be replaced (all units are started again at the end).
+for u in zivpn udp-custom badvpn-udpgw udpgw slowdns xray sing-box cloudflared ragnar-wsproxy; do
+    systemctl stop "$u" 2>/dev/null || true
+done
 mkdir -p /etc/haproxy
 
 install -m 644 "$SRC/configs/99-ragnar-tuning.conf" /etc/sysctl.d/99-ragnar-tuning.conf
@@ -251,8 +269,8 @@ ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ZARCH=amd64 || ZARCH=arm64
 # Pinned upstream release (zahidbd2/udp-zivpn) - the binary is invoked as
 # "zivpn server -c <config>", exactly as upstream's own installer does.
 ZURL="https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-${ZARCH}"
-if wget -q "$ZURL" -O /usr/local/bin/zivpn; then
-    chmod +x /usr/local/bin/zivpn
+if fetch_bin "$ZURL" /usr/local/bin/zivpn; then
+    log "ZIVPN binary installed"
 else
     warn "ZIVPN binary download failed - service created but it cannot start until /usr/local/bin/zivpn exists"
 fi
@@ -283,8 +301,8 @@ iptables -t nat -C PREROUTING -p udp --dport 6000:19999 -j REDIRECT --to-ports 5
 # UDP Custom (ePro binary, checksum-verified) + badvpn-udpgw
 # ---------------------------------------------------------------------
 if [ "$ARCH" = x86_64 ]; then
-    if wget -q https://raw.githubusercontent.com/http-custom/udp-custom/main/bin/udp-custom-linux-amd64 \
-            -O /usr/local/bin/udp-custom; then
+    if fetch_bin https://raw.githubusercontent.com/http-custom/udp-custom/main/bin/udp-custom-linux-amd64 \
+            /usr/local/bin/udp-custom; then
         echo "2a1b5584c7947feb5a02e847e09795751024f63ce7137a353c2b9c2a4282d636  /usr/local/bin/udp-custom" \
             | sha256sum -c - >/dev/null 2>&1 \
             || warn "udp-custom checksum differs from the pinned upstream hash - keeping the binary, verify upstream before trusting it"
@@ -332,9 +350,9 @@ if [ -z "$UDPGW_BIN" ]; then
     elif [ -x /usr/local/bin/udpgw ]; then
         cp /usr/local/bin/udpgw /usr/local/bin/badvpn-udpgw
         UDPGW_BIN=/usr/local/bin/badvpn-udpgw
-    elif wget -q https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw \
-            -O /usr/local/bin/badvpn-udpgw; then
-        chmod +x /usr/local/bin/badvpn-udpgw; UDPGW_BIN=/usr/local/bin/badvpn-udpgw
+    elif fetch_bin https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw \
+            /usr/local/bin/badvpn-udpgw; then
+        UDPGW_BIN=/usr/local/bin/badvpn-udpgw
     else
         warn "badvpn-udpgw download failed - UDP gateway will stay offline"
         UDPGW_BIN=/usr/local/bin/badvpn-udpgw
@@ -368,9 +386,8 @@ iptables -t nat -C POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP
 # ---------------------------------------------------------------------
 # SlowDNS (DNSTT/SLDNS build) - SSH over DNS on 53
 # ---------------------------------------------------------------------
-if wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-server \
-        -O /usr/local/bin/sldns-server; then
-    chmod +x /usr/local/bin/sldns-server
+if fetch_bin https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-server \
+        /usr/local/bin/sldns-server; then
     if [ ! -f "$BASE/slowdns/server.key" ]; then
         (cd "$BASE/slowdns" && /usr/local/bin/sldns-server -gen-key \
             -privkey-file server.key -pubkey-file server.pub 2>/dev/null)
@@ -405,17 +422,43 @@ fi
 SLOWDNS_BIN=/usr/local/bin/sldns-server
 if [ ! -x /usr/local/bin/sldns-server-kcp ]; then
     log "Building SlowDNS KCP Turbo binary from dnstt source + patch..."
-    if ! command -v go >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 || ! command -v patch >/dev/null 2>&1; then
-        apt-get install -y -q git golang-go patch >/dev/null 2>&1 || true
+    KCP_LOG=/tmp/ragnar-kcp-build.log
+    : > "$KCP_LOG"
+    command -v git >/dev/null 2>&1 || apt-get install -y -q git >>"$KCP_LOG" 2>&1 || true
+    command -v patch >/dev/null 2>&1 || apt-get install -y -q patch >>"$KCP_LOG" 2>&1 || true
+    # dnstt requires Go >= 1.21, but distro golang is older on some LTS
+    # releases (Ubuntu 22.04 ships Go 1.18) - detect that and fall back
+    # to the official toolchain tarball instead of failing silently.
+    go_is_new_enough() {
+        [ -n "$1" ] || return 1
+        local maj min
+        maj=$("$1" version 2>/dev/null | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\1/')
+        min=$("$1" version 2>/dev/null | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\2/')
+        [ "${maj:-0}" -gt 1 ] || { [ "${maj:-0}" -eq 1 ] && [ "${min:-0}" -ge 21 ]; }
+    }
+    GO_BIN=$(command -v go || true)
+    if ! go_is_new_enough "$GO_BIN"; then
+        apt-get install -y -q golang-go >>"$KCP_LOG" 2>&1 || true
+        GO_BIN=$(command -v go || true)
     fi
-    KCP_TMP=$(mktemp -d)
-    if command -v go >/dev/null 2>&1 && \
-       git clone -q --depth 1 https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" 2>/dev/null && \
+    if ! go_is_new_enough "$GO_BIN"; then
+        case "$(uname -m)" in aarch64|arm64) GA=arm64 ;; *) GA=amd64 ;; esac
+        if wget -q "https://go.dev/dl/go1.22.12.linux-${GA}.tar.gz" -O /tmp/go.tgz >>"$KCP_LOG" 2>&1 && \
+           rm -rf /usr/local/go-1.22 /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz >>"$KCP_LOG" 2>&1 && \
+           mv /usr/local/go /usr/local/go-1.22; then
+            GO_BIN=/usr/local/go-1.22/bin/go
+        fi
+        rm -f /tmp/go.tgz
+    fi
+    KCP_TMP=$(mktemp -d -p /var/tmp)
+    if go_is_new_enough "$GO_BIN" && \
+       git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" >>"$KCP_LOG" 2>&1 && \
        (cd "$KCP_TMP/dnstt" && patch -p1 -s < "$SRC/configs/kcp-turbo.patch" && \
-        cd dnstt-server && CGO_ENABLED=0 go build -trimpath -o /usr/local/bin/sldns-server-kcp .); then
+        cd dnstt-server && GOPROXY=https://proxy.golang.org,direct CGO_ENABLED=0 "$GO_BIN" build -trimpath -o /usr/local/bin/sldns-server-kcp .) >>"$KCP_LOG" 2>&1; then
         log "KCP Turbo binary built: /usr/local/bin/sldns-server-kcp"
     else
-        warn "KCP Turbo build failed - stock SlowDNS only (menu can retry after install)"
+        warn "KCP Turbo build failed - stock SlowDNS only. Last lines of $KCP_LOG:"
+        tail -n 15 "$KCP_LOG" 2>/dev/null | sed 's/^/    /'
     fi
     rm -rf "$KCP_TMP"
 fi
