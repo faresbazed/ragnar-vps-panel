@@ -8,25 +8,53 @@ BASE="/etc/ragnar"
 echo "This removes Ragnar Panel services, configs and firewall rules."
 read -rp "Continue? [y/N] " a; [ "$a" = y ] || exit 0
 
-for svc in ragnar-check.timer ragnar-watchdog.timer xray sing-box zivpn \
-           udp-custom badvpn-udpgw udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared; do
+# HAProxy FIRST: it is the front door. Stopping the backends while it is
+# still running leaves it logging "backend has no server available!" at
+# alert level forever, which journald broadcasts to every terminal.
+systemctl disable --now haproxy 2>/dev/null || true
+
+for svc in ragnar-check.timer ragnar-watchdog.timer ragnar-check ragnar-watchdog \
+           xray sing-box zivpn udp-custom badvpn-udpgw udpgw slowdns \
+           ragnar-wsproxy ragnar-landing cloudflared; do
     systemctl disable --now "$svc" 2>/dev/null || true
-    rm -f "/etc/systemd/system/$svc.service" "/etc/systemd/system/$svc.timer"
+done
+# Remove unit files by base name (the old loop built names like
+# "ragnar-check.timer.service", which never exist, and left files behind).
+for u in ragnar-check ragnar-watchdog xray sing-box zivpn udp-custom \
+         badvpn-udpgw udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared; do
+    rm -f "/etc/systemd/system/$u.service" "/etc/systemd/system/$u.timer"
 done
 systemctl daemon-reload
+systemctl reset-failed 2>/dev/null || true
 
-# HAProxy was the front door - restore the pre-Ragnar config if we kept one
+# HAProxy config: restore the pre-Ragnar config if we kept one; otherwise
+# HAProxy only existed for the panel - leave a minimal stock config in
+# place and the service disabled, never the Ragnar routing.
 if [ -f /etc/haproxy/haproxy.cfg.bak-ragnar ]; then
     mv /etc/haproxy/haproxy.cfg.bak-ragnar /etc/haproxy/haproxy.cfg
-    systemctl restart haproxy 2>/dev/null || true
+    systemctl enable --now haproxy 2>/dev/null || true
+elif [ -d /etc/haproxy ]; then
+    cat > /etc/haproxy/haproxy.cfg <<'CFG'
+global
+    log /dev/log local0
+    maxconn 2048
+    daemon
+defaults
+    log global
+    mode http
+    timeout connect 5s
+    timeout client 50s
+    timeout server 50s
+CFG
 fi
 
-# Panel NAT rules
-iptables -t nat -D PREROUTING -p udp --dport 6000:19999 -j REDIRECT --to-ports 5667 2>/dev/null || true
-iptables -t nat -D PREROUTING -p udp --dport 20000:65535 -j REDIRECT --to-ports 36712 2>/dev/null || true
-iptables -t nat -D PREROUTING -p tcp --dport 8446 -j REDIRECT --to-ports 10006 2>/dev/null || true
-for proto in udp tcp; do
-    iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+# Panel NAT rules: delete by the exact spec found in the chain, so extra
+# match clauses on a rule (e.g. "! -d 127.0.0.0/8" added by other tools)
+# cannot make a rule survive the uninstall.
+for target in 5300 5667 36712 10006; do
+    while spec=$(iptables -t nat -S PREROUTING 2>/dev/null | grep -E "REDIRECT --to-ports ${target}$" | head -1); [ -n "$spec" ]; do
+        iptables -t nat -D PREROUTING ${spec#-A PREROUTING } 2>/dev/null || break
+    done
 done
 netfilter-persistent save >/dev/null 2>&1 || true
 
