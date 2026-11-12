@@ -1,6 +1,14 @@
 --- a/dnstt-server/main.go
 +++ b/dnstt-server/main.go
-@@ -293,13 +293,18 @@
+@@ -247,6 +247,7 @@
+ 	smuxConfig.Version = 2
+ 	smuxConfig.KeepAliveTimeout = idleTimeout
+ 	smuxConfig.MaxStreamBuffer = 1 * 1024 * 1024 // default is 65536
++	smuxConfig.MaxReceiveBuffer = 16 * 1024 * 1024 // v2: default is 4194304
+ 	sess, err := smux.Server(rw, smuxConfig)
+ 	if err != nil {
+ 		return err
+@@ -293,13 +294,19 @@
  		conn.SetStreamMode(true)
  		// Disable the dynamic congestion window (limit only by the
  		// maximum of local and remote static windows).
@@ -15,12 +23,26 @@
 -			0, // default resend
 -			1, // nc=1 => congestion window off
 +			1,  // nodelay on
-+			20, // 20 ms update interval
++			10, // 10 ms update interval (v2: was 20 in the first patch)
 +			2,  // fast resend after 2 skipped ACKs
 +			1,  // nc=1 => congestion window off
  		)
 -		conn.SetWindowSize(turbotunnel.QueueSize/2, turbotunnel.QueueSize/2)
 +		conn.SetWindowSize(8*1024, 8*1024)
++		conn.SetACKNoDelay(true) // v2: ACK every segment immediately
  		if rc := conn.SetMtu(mtu); !rc {
  			panic(rc)
  		}
+--- a/turbotunnel/consts.go
++++ b/turbotunnel/consts.go
+@@ -8,7 +8,9 @@
+ 
+ // QueueSize is the size of send and receive queues in QueuePacketConn and
+ // RemoteMap.
+-const QueueSize = 128
++// KCP Turbo v2: was 128 - at high poll rates the shallow queues
++// dropped bursts and forced retransmits; 4096 smooths that.
++const QueueSize = 4096
+ 
+ var errClosedPacketConn = errors.New("operation on closed connection")
+ var errNotImplemented = errors.New("not implemented")
