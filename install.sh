@@ -451,9 +451,13 @@ if [ ! -x /usr/local/bin/sldns-server-kcp ]; then
         rm -f /tmp/go.tgz
     fi
     KCP_TMP=$(mktemp -d -p /var/tmp)
+    # NOTE: no --depth here - bamsoftware.com serves git over the dumb
+    # HTTP protocol, which rejects shallow clones outright ("dumb http
+    # transport does not support shallow capabilities"). That one flag
+    # was the whole reason the KCP build failed on some servers.
     if go_is_new_enough "$GO_BIN" && \
-       git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" >>"$KCP_LOG" 2>&1 && \
-       (cd "$KCP_TMP/dnstt" && patch -p1 -s < "$SRC/configs/kcp-turbo.patch" && \
+       git clone https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" >>"$KCP_LOG" 2>&1 && \
+       (cd "$KCP_TMP/dnstt" && patch -p1 -s --batch < "$SRC/configs/kcp-turbo.patch" && \
         cd dnstt-server && GOPROXY=https://proxy.golang.org,direct CGO_ENABLED=0 "$GO_BIN" build -trimpath -o /usr/local/bin/sldns-server-kcp .) >>"$KCP_LOG" 2>&1; then
         log "KCP Turbo binary built: /usr/local/bin/sldns-server-kcp"
     else
