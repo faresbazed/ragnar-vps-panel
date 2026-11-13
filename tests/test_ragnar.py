@@ -101,6 +101,23 @@ st = ragnar.stats()
 check("stats counts", st["ssh"] == 1 and st["vless"] == 1 and st["zivpn"] == 1
       and st["total"] == 3, str(st))
 
+# ---- human-readable display -------------------------------------------
+_txt = ragnar.fmt_links("bob")
+check("display: fmt_links is not JSON",
+      '"VLESS":' not in _txt and '"ok"' not in _txt)
+check("display: fmt_links has group headers and one link per labeled line",
+      "-- WS" in _txt and "\nVLESS   vless://" in _txt
+      and "\nANYTLS  anytls://" in _txt)
+_rows = {"bob": {"expiry": "2027-01-01", "days_left": 30, "quota_gb": 0,
+                 "ip_limit": 2, "enabled": True}}
+_tab = ragnar.fmt_users(_rows)
+check("display: fmt_users is a table, not JSON",
+      _tab.startswith("NAME") and "bob" in _tab and "unlimited" in _tab
+      and "{" not in _tab)
+_info = ragnar.fmt_ssh_info("alice") if "alice" in ragnar.load_ssh() else ""
+check("display: fmt_ssh_info readable",
+      _info == "" or ("SSH user : alice" in _info and "{" not in _info))
+
 print()
 if failures:
     print("FAILED:", failures); sys.exit(1)

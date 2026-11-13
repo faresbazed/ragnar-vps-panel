@@ -180,7 +180,7 @@ xray_create() {
 xray_links() {
     local u proto; read -rp "Username: " u; proto="${1:-}"
     if [ -n "$proto" ]; then
-        python3 "$CORE" xray-links "$u" | grep -i -A1 "$proto" || python3 "$CORE" xray-links "$u"
+        python3 "$CORE" xray-links "$u" | grep -i "^$proto" || python3 "$CORE" xray-links "$u"
     else
         python3 "$CORE" xray-links "$u"
     fi

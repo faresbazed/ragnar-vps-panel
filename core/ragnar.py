@@ -554,6 +554,66 @@ def sync_linux_user(username, password, expiry, enabled=True):
 
 
 # --------------------------------------------------------------------------
+# Human-readable display (the menu prints these verbatim; pass --json to
+# the list/info/links commands to get the old machine format instead)
+# --------------------------------------------------------------------------
+def _qstr(quota_gb):
+    return "unlimited" if not quota_gb else f"{float(quota_gb):g} GB"
+
+
+def _istr(ip_limit):
+    return "unlimited" if not ip_limit else str(ip_limit)
+
+
+def fmt_links(name):
+    lines = [f"Xray user: {name}"]
+    for label, protos in links_for(name).items():
+        lines.append("")
+        lines.append(f"-- {label} --")
+        for proto, link in protos.items():
+            lines.append(f"{proto:<7} {link}")
+    return "\n".join(lines)
+
+
+def fmt_users(users):
+    if not users:
+        return "No users yet."
+    lines = [f"{'NAME':<16}{'EXPIRES':<12}{'LEFT':<7}{'QUOTA':<11}{'IP LIMIT':<10}STATUS"]
+    for n, u in users.items():
+        lines.append(
+            f"{n:<16}{u['expiry']:<12}{str(u['days_left']) + 'd':<7}"
+            f"{_qstr(u['quota_gb']):<11}{_istr(u['ip_limit']):<10}"
+            f"{'active' if u.get('enabled', True) else 'DISABLED'}")
+    return "\n".join(lines)
+
+
+def fmt_zivpn_users(users):
+    if not users:
+        return "No users yet."
+    lines = [f"{'NAME':<16}{'EXPIRES':<12}LEFT"]
+    for n, u in users.items():
+        lines.append(f"{n:<16}{u['expiry']:<12}{u['days_left']}d")
+    return "\n".join(lines)
+
+
+def fmt_ssh_info(username):
+    i = ssh_info(username)
+    return "\n".join([
+        f"SSH user : {i['username']}",
+        f"Password : {i['password']}",
+        f"Host     : {i['host']}",
+        f"Direct   : SSH port {i['ssh_port']} - Dropbear port {i['dropbear_port']}",
+        f"SSH-WS   : port {i['ws_port']}, path {i['ws_path']} (framed: {i['ws_path_framed']})",
+        f"SSH-WSS  : port {i['wss_port']} (also SSH-SSL, SNI {i['sni']})",
+        f"SlowDNS  : NS {i['slowdns_ns']}",
+        f"           pubkey {i['slowdns_pubkey']}",
+        f"UDP      : ZIVPN port {i['udp_zivpn_port']} - UDP Custom ports {i['udp_custom_port']}",
+        f"Expires  : {i['expiry']} ({i['days_left']} days left)",
+        f"Quota    : {_qstr(i['quota_gb'])} - IP limit: {_istr(i['ip_limit'])}",
+    ])
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 def _p(obj):
@@ -570,7 +630,7 @@ def main(argv):
             u, p, d, q, i = args[0], args[1], int(args[2]), float(args[3]), int(args[4])
             rec = ssh_add(u, p, d, q, i)
             sync_linux_user(u, p, rec["expiry"])
-            _p({"ok": True, "user": u, **ssh_info(u)})
+            print(f"SSH user '{u}' created.\n\n{fmt_ssh_info(u)}")
         elif cmd == "ssh-edit":
             kw = {}
             i = 1
@@ -590,23 +650,24 @@ def main(argv):
                     i += 1
             u = ssh_edit(args[0], **kw)
             sync_linux_user(args[0], u["password"], u["expiry"], u.get("enabled", True))
-            _p({"ok": True, **ssh_info(args[0])})
+            print(f"SSH user '{args[0]}' saved.\n\n{fmt_ssh_info(args[0])}")
         elif cmd == "ssh-del":
             ssh_del(args[0]); _run(f"userdel -r {args[0]} 2>/dev/null; true")
-            _p({"ok": True, "deleted": args[0]})
+            print(f"SSH user '{args[0]}' deleted.")
         elif cmd == "ssh-list":
-            _p({n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
-                    "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
-                    "enabled": u.get("enabled", True)}
-                  for n, u in load_ssh().items()})
+            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
+                        "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
+                        "enabled": u.get("enabled", True)}
+                    for n, u in load_ssh().items()}
+            _p(data) if "--json" in args else print(fmt_users(data))
         elif cmd == "ssh-info":
-            _p(ssh_info(args[0]))
+            _p(ssh_info(args[0])) if "--json" in args[1:] else print(fmt_ssh_info(args[0]))
         elif cmd == "xray-add":
             name = args[0]; d = int(args[1])
             q = float(args[2]) if len(args) > 2 else 0
             i = int(args[3]) if len(args) > 3 else 0
             xray_add(name, d, q, i); apply_configs()
-            _p({"ok": True, "user": name, "links": links_for(name)})
+            print(f"Xray user '{name}' created.\n\n{fmt_links(name)}")
         elif cmd == "xray-edit":
             kw = {}
             i = 1
@@ -623,24 +684,28 @@ def main(argv):
                 else:
                     i += 1
             xray_edit(args[0], **kw); apply_configs()
-            _p({"ok": True, "user": args[0], "links": links_for(args[0])})
+            print(f"Xray user '{args[0]}' saved.\n\n{fmt_links(args[0])}")
         elif cmd == "xray-del":
-            xray_del(args[0]); apply_configs(); _p({"ok": True, "deleted": args[0]})
+            xray_del(args[0]); apply_configs()
+            print(f"Xray user '{args[0]}' deleted.")
         elif cmd == "xray-list":
-            _p({n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
-                    "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
-                    "enabled": u.get("enabled", True)}
-                  for n, u in load_xray().items()})
+            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
+                        "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
+                        "enabled": u.get("enabled", True)}
+                    for n, u in load_xray().items()}
+            _p(data) if "--json" in args else print(fmt_users(data))
         elif cmd == "xray-links":
-            _p(links_for(args[0]))
+            _p(links_for(args[0])) if "--json" in args[1:] else print(fmt_links(args[0]))
         elif cmd == "zivpn-add":
             zivpn_add(args[0], args[1], int(args[2])); apply_configs()
-            _p({"ok": True, "user": args[0]})
+            print(f"ZIVPN user '{args[0]}' created.")
         elif cmd == "zivpn-del":
-            zivpn_del(args[0]); apply_configs(); _p({"ok": True, "deleted": args[0]})
+            zivpn_del(args[0]); apply_configs()
+            print(f"ZIVPN user '{args[0]}' deleted.")
         elif cmd == "zivpn-list":
-            _p({n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"])}
-                  for n, u in load_zivpn().items()})
+            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"])}
+                    for n, u in load_zivpn().items()}
+            _p(data) if "--json" in args else print(fmt_zivpn_users(data))
         elif cmd == "gen-configs":
             apply_configs(); _p({"ok": True})
         elif cmd == "stats":
