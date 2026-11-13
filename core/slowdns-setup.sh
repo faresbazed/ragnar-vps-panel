@@ -61,9 +61,22 @@ MTU=$(get_setting slowdns_mtu 1232)
 RESOLVER=$(get_setting slowdns_resolver 1.1.1.1)
 TARGET=$(get_setting slowdns_target 22)
 
-# UDP buffer headroom (step 1 of the other panel's setup; this panel's
-# sysctl file already sets larger socket-buffer maximums, so only the
-# backlog is raised here).
+# UDP buffers (step 1 of the other panel's setup, applied at runtime).
+# The dnstt server's UDP socket gets the kernel DEFAULT buffer, so the
+# defaults matter as much as the maximums: 16 MB defaults keep DNS
+# bursts from being dropped on lossy resolver paths. (An earlier port
+# of this setup skipped these lines and SlowDNS ran on 1 MB defaults -
+# noticeably slower than the other panel on the same server.) The
+# maximums are only ever raised here, never lowered: this panel's
+# sysctl file sets 64 MB, the other panel's runtime value is 32 MB.
+sysctl -w net.core.rmem_default=16777216 >/dev/null 2>&1 || true
+sysctl -w net.core.wmem_default=16777216 >/dev/null 2>&1 || true
+for k in net.core.rmem_max net.core.wmem_max; do
+    cur=$(sysctl -n "$k" 2>/dev/null || echo 0)
+    if [ "${cur:-0}" -lt 33554432 ]; then
+        sysctl -w "$k=33554432" >/dev/null 2>&1 || true
+    fi
+done
 sysctl -w net.core.netdev_max_backlog=16384 >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------

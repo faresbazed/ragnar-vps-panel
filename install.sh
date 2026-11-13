@@ -121,18 +121,30 @@ CERT_OK=0
 if [ -n "$DOMAIN" ]; then
     DIP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1)
     if [ "$DIP" = "$PUBIP" ]; then
+        # certbot --standalone must bind port 80 itself: stop HAProxy if
+        # a previous install left it running (the HAProxy section below
+        # restarts it). Certbot output goes to a log file, never to
+        # /dev/null - a silently swallowed certbot failure cost a real
+        # debugging round on 2026-11-13 (broken python SSL stack on the
+        # box, invisible behind the self-signed fallback).
+        systemctl stop haproxy 2>/dev/null || true
+        : > /tmp/ragnar-certbot.log
         # Preferred: one cert covering the domain AND anytls.<domain>.
         # If anytls.<domain> has no DNS record yet the whole order fails,
         # so fall back to a domain-only cert instead of self-signed.
         if certbot certonly --standalone --non-interactive --agree-tos \
-                -m "admin@$DOMAIN" -d "$DOMAIN" -d "anytls.$DOMAIN" 2>/dev/null; then
+                -m "admin@$DOMAIN" -d "$DOMAIN" -d "anytls.$DOMAIN" \
+                >>/tmp/ragnar-certbot.log 2>&1; then
             CERT_OK=1; log "Let's Encrypt certificate installed (domain + anytls subdomain)"
         elif certbot certonly --standalone --non-interactive --agree-tos \
-                -m "admin@$DOMAIN" -d "$DOMAIN" 2>/dev/null; then
+                -m "admin@$DOMAIN" -d "$DOMAIN" >>/tmp/ragnar-certbot.log 2>&1; then
             CERT_OK=1
             warn "Let's Encrypt certificate installed for $DOMAIN only."
             warn "Add an A record  anytls.$DOMAIN -> $PUBIP  and re-run install.sh"
             warn "so the AnyTLS name is covered too (AnyTLS needs that record anyway)."
+        else
+            warn "certbot failed - last lines of /tmp/ragnar-certbot.log:"
+            tail -n 8 /tmp/ragnar-certbot.log 2>/dev/null | sed 's/^/    /'
         fi
         if [ "$CERT_OK" = 1 ]; then
             cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$BASE/certs/fullchain.pem"
@@ -455,6 +467,22 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     for p in 22/tcp 80/tcp 443/tcp 109/tcp 143/tcp 53 53/udp 53/tcp 5667/udp \
              36712/udp 6000:19999/udp 20000:65535/udp 8446/tcp 2053/tcp; do
         ufw allow "$p" >/dev/null 2>&1 || true
+    done
+fi
+# Same protection when UFW's chains are loaded and enforcing but
+# `ufw status` does not report active (observed live 2026-11-13 on the
+# hosting.de box: ufw-user-input held only fossil rules for 22/53/8080/
+# 8081, so the whole panel - 80/443 included - was unreachable from
+# outside and Let's Encrypt validation timed out, while the block
+# above silently skipped). The UDP port ranges are NAT-redirected to
+# 5667/36712 before INPUT, so those two ports cover them here.
+if iptables -S ufw-user-input >/dev/null 2>&1; then
+    for spec in "tcp 22" "tcp 80" "tcp 443" "tcp 109" "tcp 143" \
+                "tcp 53" "udp 53" "udp 5667" "udp 36712" \
+                "tcp 8446" "tcp 2053"; do
+        set -- $spec
+        iptables -C ufw-user-input -p "$1" --dport "$2" -j ACCEPT 2>/dev/null || \
+            iptables -A ufw-user-input -p "$1" --dport "$2" -j ACCEPT 2>/dev/null || true
     done
 fi
 # persist iptables NAT rules across reboots
