@@ -294,6 +294,25 @@ def zivpn_del(name):
     _write_json(ZIVPN_DB, {"users": users})
 
 
+def zivpn_edit(name, days=None, password=None, extend=False, enable=None):
+    users = load_zivpn()
+    if name not in users:
+        raise ValueError(f"ZIVPN user '{name}' not found")
+    u = users[name]
+    if days is not None:
+        if extend:
+            base = max(_dt.date.fromisoformat(u["expiry"]), _today())
+            u["expiry"] = (base + _dt.timedelta(days=int(days))).isoformat()
+        else:
+            u["expiry"] = expiry_from_days(days)
+    if password:
+        u["password"] = password
+    if enable is not None:
+        u["enabled"] = bool(enable)
+    _write_json(ZIVPN_DB, {"users": users})
+    return u
+
+
 def zivpn_passwords():
     return [u["password"] for u in load_zivpn().values()
             if u.get("enabled", True) and not is_expired(u["expiry"])]

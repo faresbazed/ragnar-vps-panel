@@ -34,6 +34,7 @@ import sys; sys.path.insert(0, 'core')
 import ragnar
 ragnar.ssh_add('webuser', 'pw123456', 30, 0, 0)
 ragnar.xray_add('xuser', 30, 0, 0)
+ragnar.zivpn_add('zuser', 'zpw12345', 30)
 """], cwd=ROOT, env=env, capture_output=True, text=True)
         assert seed.returncode == 0, seed.stderr
         subprocess.run([sys.executable, os.path.join(ROOT, "web", "webpanel.py"),
@@ -101,6 +102,39 @@ ragnar.xray_add('xuser', 30, 0, 0)
         links = op.open(BASE_URL + "/xray/links?u=xuser").read().decode()
         self.assertIn("vless://", links)
         self.assertIn("anytls://", links)
+
+    def test_edit_flows(self):
+        import urllib.parse
+        op = self.opener()
+        self.login(op)
+        dash = op.open(BASE_URL + "/").read().decode()
+        self.assertIn("tblwrap", dash)  # scrollable table wrapper
+        # --- xray edit: quota + extend --------------------------------
+        page = op.open(BASE_URL + "/xray/edit?u=xuser").read().decode()
+        self.assertIn("Edit", page)
+        csrf = re.search(r'name="csrf" value="([0-9a-f]+)"', page).group(1)
+        form = urllib.parse.urlencode(
+            {"csrf": csrf, "user": "xuser", "days": "10", "quota": "50",
+             "iplimit": "3", "enabled": "yes"}).encode()
+        op.open(BASE_URL + "/xray/edit", data=form)
+        lst = op.open(BASE_URL + "/xray").read().decode()
+        self.assertIn("50.00 GB", lst)          # quota applied
+        self.assertIn("40d", lst)               # 30 + 10 days
+        self.assertIn(">Edit</a>", lst)         # edit button in the row
+        # --- zivpn edit: extend + password ----------------------------
+        page = op.open(BASE_URL + "/zivpn/edit?u=zuser").read().decode()
+        csrf = re.search(r'name="csrf" value="([0-9a-f]+)"', page).group(1)
+        form = urllib.parse.urlencode(
+            {"csrf": csrf, "user": "zuser", "days": "5",
+             "password": "newpass99", "enabled": "yes"}).encode()
+        op.open(BASE_URL + "/zivpn/edit", data=form)
+        lst = op.open(BASE_URL + "/zivpn").read().decode()
+        self.assertIn("35d", lst)               # 30 + 5 days
+        # --- ssh edit page renders with all fields --------------------
+        page = op.open(BASE_URL + "/ssh/edit?u=webuser").read().decode()
+        for field in ('name="days"', 'name="quota"', 'name="iplimit"',
+                      'name="password"', 'name="enabled"'):
+            self.assertIn(field, page)
 
     def test_base_path_mode(self):
         """The HAProxy-fronted setup: app under /panel, loopback, HTTP."""

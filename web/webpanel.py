@@ -268,7 +268,7 @@ input, select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
        padding: 10px 12px; margin: 6px 0 14px; word-break: break-all;
        font-family: monospace; font-size: 12px; }
 h3 { margin: 20px 0 8px; font-size: 15px; color: #c4b5fd; }
-.login-wrap { margin: auto; width: 360px; }
+.login-wrap { margin: auto; width: 360px; max-width: 92vw; }
 .login-card { background: #1e293b; border: 1px solid #334155; border-radius: 14px;
        padding: 34px 30px; }
 .login-card h1 { text-align: center; color: #a78bfa; margin-bottom: 4px; }
@@ -276,8 +276,31 @@ h3 { margin: 20px 0 8px; font-size: 15px; color: #c4b5fd; }
 .login-card label { font-size: 12.5px; color: #94a3b8; display: block; margin: 13px 0 5px; }
 .login-card input { width: 100%; padding: 11px; }
 .login-card .btn { width: 100%; padding: 11px; margin-top: 20px; font-size: 14.5px; }
-@media (max-width: 760px) { .sidebar { width: 64px; } .logo small, .nav a span
-  { display: none; } .main { padding: 18px 14px; } }
+.tblwrap { overflow-x: auto; -webkit-overflow-scrolling: touch;
+       border-radius: 10px; }
+.tblwrap table { min-width: 580px; }
+.tblwrap td { white-space: nowrap; }
+.editform { max-width: 520px; }
+.editform label { font-size: 12.5px; color: #94a3b8; display: block;
+       margin: 14px 0 5px; }
+.editform input, .editform select { width: 100%; padding: 10px; }
+@media (max-width: 880px) {
+  body { flex-direction: column; }
+  .sidebar { width: 100%; padding: 12px 0 0; border-right: none;
+       border-bottom: 1px solid #1e293b; }
+  .logo { padding: 0 16px 10px; font-size: 19px; }
+  .logo small { display: inline-block; margin-left: 10px; }
+  .logo small br { display: none; }
+  .nav { display: flex; overflow-x: auto; padding: 0 6px 10px;
+       -webkit-overflow-scrolling: touch; }
+  .nav a { border-left: none; border-bottom: 3px solid transparent;
+       padding: 8px 11px; white-space: nowrap; }
+  .nav a.on { border-bottom-color: #8b5cf6; }
+  .main { padding: 16px 12px; width: 100%; }
+  .addform { flex-direction: column; align-items: stretch; }
+  .addform input { width: 100%; }
+  h1 { font-size: 19px; margin-bottom: 14px; }
+}
 """
 
 
@@ -337,15 +360,16 @@ def user_table(rows, kind, csrf):
             f"<td>{esc(fmt_quota(u))}</td>"
             f"<td>{esc(u.get('ip_limit') or '∞')}</td><td>{status}</td>"
             f'<td style="white-space:nowrap">{links}'
+            f'<a class="btn sm" href="{U("/" + kind + "/edit")}?u={esc(name)}">Edit</a> '
             f'<form class="inline" method="post" action="{U("/" + kind + "/action")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="user" value="{esc(name)}">'
-            f'<button class="btn sm grey" name="op" value="renew30">+30d</button> '
             f'<button class="btn sm grey" name="op" value="{toggle}">{toggle}</button> '
             f'<button class="btn sm red" name="op" value="delete" '
             f'onclick="return confirm(\'Delete {esc(name)}?\')">delete</button>'
             f"</form></td></tr>")
-    return f"<table>{head}{''.join(out) or '<tr><td>No users yet.</td></tr>'}</table>"
+    return (f'<div class="tblwrap"><table>{head}'
+            f"{''.join(out) or '<tr><td>No users yet.</td></tr>'}</table></div>")
 
 
 def add_user_form(kind, csrf):
@@ -396,7 +420,8 @@ def page_dashboard(csrf, flash=""):
         for s in SERVICES)
     return layout("Dashboard", "dashboard",
                   f'<div class="cards">{card_html}</div>'
-                  f"<h3>Services</h3><table>{svc}</table>", flash)
+                  f'<h3>Services</h3><div class="tblwrap">'
+                  f"<table>{svc}</table></div>", flash)
 
 
 def page_users(kind, csrf, flash=""):
@@ -408,16 +433,64 @@ def page_users(kind, csrf, flash=""):
         body = "".join(
             f"<tr><td><b>{esc(n)}</b></td><td>{esc(u['expiry'])}</td>"
             f"<td>{esc(u['days_left'])}d</td>"
-            f'<td><form class="inline" method="post" action="{U("/zivpn/action")}">'
+            f'<td style="white-space:nowrap">'
+            f'<a class="btn sm" href="{U("/zivpn/edit")}?u={esc(n)}">Edit</a> '
+            f'<form class="inline" method="post" action="{U("/zivpn/action")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="user" value="{esc(n)}">'
             f'<button class="btn sm red" name="op" value="delete" '
             f'onclick="return confirm(\'Delete {esc(n)}?\')">delete</button>'
             f"</form></td></tr>" for n, u in rows.items())
-        table = f"<table>{head}{body or '<tr><td>No users yet.</td></tr>'}</table>"
+        table = (f'<div class="tblwrap"><table>{head}'
+                 f"{body or '<tr><td>No users yet.</td></tr>'}</table></div>")
     else:
         table = user_table(rows, kind, csrf)
     return layout(titles[kind], kind, add_user_form(kind, csrf) + table, flash)
+
+
+def page_edit(kind, user, csrf, flash=""):
+    loaders = {"ssh": ragnar.load_ssh, "xray": ragnar.load_xray,
+               "zivpn": ragnar.load_zivpn}
+    users = loaders[kind]()
+    if user not in users:
+        return layout("Edit user", kind, f"<p>User '{esc(user)}' not found.</p>")
+    u = users[user]
+    left = ragnar.days_left(u["expiry"])
+    used = (f"<p style='margin-top:4px'>Used so far: "
+            f"<b>{esc(fmt_used(u))}</b></p>" if kind != "zivpn" else "")
+    quota = ""
+    if kind in ("ssh", "xray"):
+        quota = f"""
+<label>Quota GB (0 = unlimited)</label>
+<input name="quota" type="number" step="any" min="0" value="{esc(u.get('quota_gb', 0))}">
+<label>IP limit (0 = unlimited)</label>
+<input name="iplimit" type="number" min="0" value="{esc(u.get('ip_limit', 0))}">"""
+    password = ""
+    if kind in ("ssh", "zivpn"):
+        password = """
+<label>New password (leave empty to keep the current one)</label>
+<input name="password" type="text" autocomplete="off">"""
+    enabled = "yes" if u.get("enabled", True) else "no"
+    body = f"""<div class="card editform">
+<div class="k">{esc(kind.upper())} user</div>
+<div class="v">{esc(user)}</div>
+<p>Expires: <b>{esc(u['expiry'])}</b> ({esc(left)} days left)</p>{used}
+<form method="post" action="{U('/' + kind + '/edit')}">
+<input type="hidden" name="csrf" value="{csrf}">
+<input type="hidden" name="user" value="{esc(user)}">
+<label>Add days (extends the current expiry)</label>
+<input name="days" type="number" min="0" value="0">
+{quota}{password}
+<label>Enabled</label>
+<select name="enabled">
+<option value="yes" {'selected' if enabled == 'yes' else ''}>Yes</option>
+<option value="no" {'selected' if enabled == 'no' else ''}>No</option>
+</select>
+<div style="margin-top:20px">
+<button class="btn" type="submit">Save changes</button>
+<a class="btn grey" href="{U('/' + kind)}">Back</a>
+</div></form></div>"""
+    return layout(f"Edit {user}", kind, body, flash)
 
 
 def page_xray_links(user, csrf, flash=""):
@@ -455,7 +528,8 @@ def page_services(csrf, flash=""):
             f"<tr><td>KCP Turbo</td><td>"
             f"{'ON' if st.get('slowdns_kcp') else 'OFF'}</td></tr></table>")
     return layout("Services", "services",
-                  f"<table>{rows}</table>{slow}", flash)
+                  f'<div class="tblwrap"><table>{rows}</table></div>{slow}',
+                  flash)
 
 
 def page_settings(csrf, flash=""):
@@ -532,6 +606,50 @@ def do_user_action(kind, form):
     except Exception as exc:  # surfaced to the admin as a flash message
         return f"Error: {exc}"
     return "Unknown action."
+
+
+def do_edit(kind, form):
+    user = form.get("user", "").strip()
+    if not user:
+        return "Missing username."
+    try:
+        days = int(form.get("days", 0))
+        enable = form.get("enabled", "yes") == "yes"
+        password = form.get("password", "")
+        if kind == "ssh":
+            kw = {"enable": enable}
+            if days > 0:
+                kw.update(days=days, extend=True)
+            if "quota" in form:
+                kw["quota_gb"] = float(form["quota"])
+            if "iplimit" in form:
+                kw["ip_limit"] = int(form["iplimit"])
+            if password:
+                kw["password"] = password
+            u = ragnar.ssh_edit(user, **kw)
+            ragnar.sync_linux_user(user, u["password"], u["expiry"],
+                                   u.get("enabled", True))
+        elif kind == "xray":
+            kw = {"enable": enable}
+            if days > 0:
+                kw.update(days=days, extend=True)
+            if "quota" in form:
+                kw["quota_gb"] = float(form["quota"])
+            if "iplimit" in form:
+                kw["ip_limit"] = int(form["iplimit"])
+            ragnar.xray_edit(user, **kw)
+            ragnar.apply_configs()
+        elif kind == "zivpn":
+            kw = {"enable": enable}
+            if days > 0:
+                kw.update(days=days, extend=True)
+            if password:
+                kw["password"] = password
+            ragnar.zivpn_edit(user, **kw)
+            ragnar.apply_configs()
+        return f"User '{user}' saved."
+    except Exception as exc:  # surfaced to the admin as a flash message
+        return f"Error: {exc}"
 
 
 # ---------------------------------------------------------------------
@@ -613,6 +731,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, page_dashboard(csrf, flash))
             elif path in ("/ssh", "/xray", "/zivpn"):
                 self._send(200, page_users(path[1:], csrf, flash))
+            elif path in ("/ssh/edit", "/xray/edit", "/zivpn/edit"):
+                self._send(200, page_edit(path.split("/")[1],
+                                          qs.get("u", [""])[0], csrf, flash))
             elif path == "/xray/links":
                 self._send(200, page_xray_links(qs.get("u", [""])[0], csrf, flash))
             elif path == "/services":
@@ -647,6 +768,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/ssh/action", "/xray/action", "/zivpn/action"):
             kind = path.split("/")[1]
             msg = do_user_action(kind, form)
+            return self._redirect(U(f"/{kind}") + "?msg=" + urllib.parse.quote(msg))
+        if path in ("/ssh/edit", "/xray/edit", "/zivpn/edit"):
+            kind = path.split("/")[1]
+            msg = do_edit(kind, form)
             return self._redirect(U(f"/{kind}") + "?msg=" + urllib.parse.quote(msg))
         if path == "/services/restart":
             unit = form.get("unit", "")
