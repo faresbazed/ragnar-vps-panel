@@ -220,7 +220,12 @@ LimitNOFILE=1048576
 EOF
 systemctl daemon-reload
 haproxy -c -f /etc/haproxy/haproxy.cfg || die "HAProxy config invalid - aborting"
-systemctl enable --now haproxy
+# restart, not just enable --now: on a re-install HAProxy may already be
+# running with the previous config in memory (observed live 2026-11-13:
+# the new /panel routing sat on disk while the old process kept serving
+# the old config, and the web panel 404'd until a manual restart).
+systemctl enable haproxy
+systemctl restart haproxy
 
 # ---------------------------------------------------------------------
 # Xray (VLESS / VMESS / Trojan / SSWS over WS) + sing-box (AnyTLS)
