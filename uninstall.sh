@@ -15,13 +15,14 @@ systemctl disable --now haproxy 2>/dev/null || true
 
 for svc in ragnar-check.timer ragnar-watchdog.timer ragnar-check ragnar-watchdog \
            xray sing-box zivpn udp-custom badvpn-udpgw udpgw slowdns \
-           ragnar-wsproxy ragnar-landing cloudflared; do
+           ragnar-wsproxy ragnar-landing cloudflared ragnar-web; do
     systemctl disable --now "$svc" 2>/dev/null || true
 done
 # Remove unit files by base name (the old loop built names like
 # "ragnar-check.timer.service", which never exist, and left files behind).
 for u in ragnar-check ragnar-watchdog xray sing-box zivpn udp-custom \
-         badvpn-udpgw udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared; do
+         badvpn-udpgw udpgw slowdns ragnar-wsproxy ragnar-landing cloudflared \
+         ragnar-web; do
     rm -f "/etc/systemd/system/$u.service" "/etc/systemd/system/$u.timer"
 done
 systemctl daemon-reload

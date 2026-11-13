@@ -132,7 +132,7 @@ _rows = {"bob": {"expiry": "2027-01-01", "days_left": 30, "quota_gb": 0,
                  "ip_limit": 2, "enabled": True}}
 _tab = ragnar.fmt_users(_rows)
 check("display: fmt_users is a table, not JSON",
-      _tab.startswith("NAME") and "bob" in _tab and "unlimited" in _tab
+      _tab.startswith("┌") and "bob" in _tab and "0B/∞" in _tab
       and "{" not in _tab)
 _info = ragnar.fmt_ssh_info("alice") if "alice" in ragnar.load_ssh() else ""
 check("display: fmt_ssh_info is a bordered table",
@@ -147,7 +147,7 @@ _tab2 = ragnar.fmt_users({"bob": {"expiry": "2027-01-01", "days_left": 30,
                                   "enabled": True,
                                   "used_bytes": 5 * 1024 ** 3, "live": 2}})
 check("display: fmt_users shows used GB and live count",
-      "5.00 GB" in _tab2 and "USED" in _tab2 and "LIVE" in _tab2)
+      "5G/100G" in _tab2 and "USED/QUOTA" in _tab2 and "LIVE" in _tab2)
 
 # ---- bandwidth parsing --------------------------------------------------
 import time as _t
@@ -184,3 +184,33 @@ print()
 if failures:
     print("FAILED:", failures); sys.exit(1)
 print("ALL CORE TESTS PASSED")
+
+
+class TestBorderedTables(unittest.TestCase):
+    def test_ssh_table_is_48_wide_box(self):
+        users = {
+            "channel": {"expiry": "2026-11-18", "days_left": 5,
+                        "used_bytes": 0, "quota_gb": 0, "enabled": True,
+                        "live": 2},
+            "fares": {"expiry": "2026-12-11", "days_left": 28,
+                      "used_bytes": int(1.13 * 1024 ** 3), "quota_gb": 100,
+                      "enabled": True, "live": "-"},
+        }
+        out = R.fmt_users(users, "SSH USERS")
+        lines = out.splitlines()
+        self.assertTrue(all(len(l) == 48 for l in lines), out)
+        self.assertIn("SSH USERS (2)", lines[1])
+        self.assertIn("1.13G/100G", out)
+        self.assertIn("0B/∞", out)
+        self.assertTrue(lines[0].startswith("┌") and lines[-1].startswith("└"))
+
+    def test_zivpn_table_is_48_wide_box(self):
+        users = {"u1": {"expiry": "2026-12-01", "days_left": 18}}
+        out = R.fmt_zivpn_users(users)
+        self.assertTrue(all(len(l) == 48 for l in out.splitlines()), out)
+        self.assertIn("ZIVPN USERS (1)", out)
+
+    def test_bytes_short(self):
+        self.assertEqual(R._fmt_bytes_short(0), "0B")
+        self.assertEqual(R._fmt_bytes_short(28 * 1024), "28K")
+        self.assertEqual(R._fmt_bytes_short(int(1.13 * 1024 ** 3)), "1.13G")

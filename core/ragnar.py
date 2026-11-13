@@ -787,23 +787,58 @@ def fmt_links(name):
     return "\n".join(lines)
 
 
-def fmt_users(users):
-    """Aligned user table. Rows may carry `used_bytes` (traffic the
-    checker has accounted) and `live` (a ready-made label: a session
-    count for SSH, 'active' for recently-moving Xray users)."""
+def _fmt_bytes_short(n):
+    """Compact byte count for table cells: 0B, 28K, 1.13G, 100G."""
+    n = float(n)
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            if unit == "B":
+                return f"{int(n)}B"
+            return f"{n:.2f}".rstrip("0").rstrip(".") + unit
+        n /= 1024.0
+
+
+def _bordered_table(title, cols, rows):
+    """Box table in the panel's style; cols = [(header, content_width)].
+    Each cell renders as a space + content; total width =
+    sum(widths) + 2 per column + 1."""
+    width = sum(w for _, w in cols) + 2 * len(cols) + 1
+
+    def row(cells):
+        return "│" + "│".join(
+            " " + str(c)[:w].ljust(w)
+            for c, (_, w) in zip(cells, cols)) + "│"
+
+    lines = ["┌" + "─" * (width - 2) + "┐",
+             "│ " + title[: width - 4].ljust(width - 4) + " │",
+             "├" + "┬".join("─" * (w + 1) for _, w in cols) + "┤",
+             row([h for h, _ in cols]),
+             "├" + "┼".join("─" * (w + 1) for _, w in cols) + "┤"]
+    lines += [row(r) for r in rows]
+    lines.append("└" + "┴".join("─" * (w + 1) for _, w in cols) + "┘")
+    return "\n".join(lines)
+
+
+def fmt_users(users, title="SSH USERS"):
+    """Bordered 48-wide user table. Rows may carry `used_bytes` (traffic
+    the checker has accounted) and `live` (a session count for SSH,
+    'active' for recently-moving Xray users; 'off' when disabled)."""
     if not users:
         return "No users yet."
-    head = (f"{'NAME':<15}{'EXPIRES':<11}{'LEFT':<6}{'USED':<10}"
-            f"{'QUOTA':<11}{'LIVE':<7}STATUS")
-    lines = [head, "-" * len(head)]
+    cols = [("NAME", 13), ("EXPIRES", 10), ("USED/QUOTA", 11), ("LIVE", 5)]
+    body = []
     for n, u in users.items():
-        used = fmt_gb(u["used_bytes"]) if "used_bytes" in u else "-"
-        lines.append(
-            f"{n:<15}{u['expiry']:<11}{str(u['days_left']) + 'd':<6}"
-            f"{used:<10}{_qstr(u['quota_gb']):<11}"
-            f"{str(u.get('live', '-')):<7}"
-            f"{'active' if u.get('enabled', True) else 'DISABLED'}")
-    return "\n".join(lines)
+        used = _fmt_bytes_short(u.get("used_bytes", 0))
+        quota = ("∞" if not u.get("quota_gb")
+                 else _fmt_bytes_short(u["quota_gb"] * 1024 ** 3))
+        if not u.get("enabled", True):
+            live = "off"
+        elif u.get("live") == "active":
+            live = "on"
+        else:
+            live = str(u.get("live", "-"))
+        body.append((n, u.get("expiry") or "-", f"{used}/{quota}", live))
+    return _bordered_table(f"{title} ({len(users)})", cols, body)
 
 
 def _card(title, rows):
@@ -827,10 +862,10 @@ def _card(title, rows):
 def fmt_zivpn_users(users):
     if not users:
         return "No users yet."
-    lines = [f"{'NAME':<16}{'EXPIRES':<12}LEFT"]
-    for n, u in users.items():
-        lines.append(f"{n:<16}{u['expiry']:<12}{u['days_left']}d")
-    return "\n".join(lines)
+    cols = [("NAME", 23), ("EXPIRES", 12), ("LEFT", 6)]
+    body = [(n, u.get("expiry") or "-", f"{u['days_left']}d")
+            for n, u in users.items()]
+    return _bordered_table(f"ZIVPN USERS ({len(users)})", cols, body)
 
 
 def fmt_ssh_info(username):
@@ -955,7 +990,7 @@ def main(argv):
             print(f"SSH user '{args[0]}' deleted.")
         elif cmd == "ssh-list":
             data = _list_rows("ssh")
-            _p(data) if "--json" in args else print(fmt_users(data))
+            _p(data) if "--json" in args else print(fmt_users(data, "SSH USERS"))
         elif cmd == "ssh-info":
             _p(ssh_info(args[0])) if "--json" in args[1:] else print(fmt_ssh_info(args[0]))
         elif cmd == "xray-add":
@@ -986,7 +1021,7 @@ def main(argv):
             print(f"Xray user '{args[0]}' deleted.")
         elif cmd == "xray-list":
             data = _list_rows("xray")
-            _p(data) if "--json" in args else print(fmt_users(data))
+            _p(data) if "--json" in args else print(fmt_users(data, "XRAY USERS"))
         elif cmd == "xray-links":
             _p(links_for(args[0])) if "--json" in args[1:] else print(fmt_links(args[0]))
         elif cmd == "xray-info":

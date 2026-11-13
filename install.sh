@@ -92,13 +92,14 @@ root hard nofile 1048576
 EOF
 systemctl enable vnstat >/dev/null 2>&1 || true
 
-mkdir -p "$BASE"/{db,core,certs,xray,sing-box,zivpn,udp,slowdns}
+mkdir -p "$BASE"/{db,core,certs,xray,sing-box,zivpn,udp,slowdns,web}
 install -m 755 "$SRC/core/ragnar.py"   "$BASE/core/ragnar.py"
 install -m 755 "$SRC/core/checker.py"  "$BASE/core/checker.py"
 install -m 755 "$SRC/core/wsproxy.py"  "$BASE/core/wsproxy.py"
 install -m 755 "$SRC/core/watchdog.sh" "$BASE/core/watchdog.sh"
 install -m 755 "$SRC/menu.sh"          "$BASE/menu.sh"
 install -m 755 "$SRC/uninstall.sh"     "$BASE/uninstall.sh"
+install -m 755 "$SRC/web/webpanel.py"  "$BASE/web/webpanel.py"
 ln -sf "$BASE/menu.sh" /usr/local/bin/menu
 ln -sf "$BASE/menu.sh" /usr/local/bin/ragnar
 echo "$PUBIP" > "$BASE/host"
@@ -543,7 +544,7 @@ EOF
 # ---------------------------------------------------------------------
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     for p in 22/tcp 80/tcp 443/tcp 109/tcp 143/tcp 53 53/udp 53/tcp 5667/udp \
-             36712/udp 6000:19999/udp 20000:65535/udp 8446/tcp; do
+             36712/udp 6000:19999/udp 20000:65535/udp 8446/tcp 2053/tcp; do
         ufw allow "$p" >/dev/null 2>&1 || true
     done
 fi
@@ -557,9 +558,29 @@ netfilter-persistent save >/dev/null 2>&1 || \
 # ---------------------------------------------------------------------
 RAGNAR_DIR="$BASE" python3 "$BASE/core/ragnar.py" gen-configs || true
 cp "$BASE/xray/config.json" /usr/local/etc/xray/config.json 2>/dev/null || true
+
+# ---------------------------------------------------------------------
+# Web panel (3x-ui style, HTTPS :2053 with the domain certificate)
+# ---------------------------------------------------------------------
+cat > /etc/systemd/system/ragnar-web.service <<'EOF'
+[Unit]
+Description=Ragnar Web Panel
+After=network.target
+[Service]
+Type=simple
+Environment=RAGNAR_DIR=/etc/ragnar
+ExecStart=/usr/bin/python3 /etc/ragnar/web/webpanel.py
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+RAGNAR_DIR="$BASE" python3 "$BASE/web/webpanel.py" --init || true
+
 systemctl daemon-reload
 for svc in haproxy ssh dropbear ragnar-wsproxy ragnar-landing xray sing-box zivpn \
-           udp-custom badvpn-udpgw slowdns ragnar-check.timer ragnar-watchdog.timer; do
+           udp-custom badvpn-udpgw slowdns ragnar-check.timer ragnar-watchdog.timer \
+           ragnar-web; do
     systemctl enable --now "$svc" 2>/dev/null || warn "could not start $svc (check: systemctl status $svc)"
 done
 
@@ -568,6 +589,10 @@ cat <<EOF
 =====================================================================
   $PANEL installed.
   Open the panel with:      menu        (or: ragnar)
+  Web panel (HTTPS)   :     https://<your-domain>:2053
+                            (login printed above by --init; reset any
+                            time from menu > WEB PANEL > RESET ADMIN
+                            PASSWORD)
 
   Ports
     22/tcp    SSH direct          109/tcp  Dropbear

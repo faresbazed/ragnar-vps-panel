@@ -116,6 +116,21 @@ conntrack headroom, `LimitNOFILE` everywhere.
 - **Clear RAM**, **Reboot VPS**, **Uninstall** — all in the menu
 - `ragnar-check.timer` enforces expiry/quota/IP limits every minute;
   `ragnar-watchdog.timer` restarts any dead service every minute
+- SSH traffic accounting uses per-socket `ss -tnpi` byte counters
+  (iptables owner-match cannot see daemon relay traffic — accepted
+  sockets belong to the root listener)
+
+### Web panel (3x-ui style)
+- `https://<your-domain>:2053` — username/password login (PBKDF2,
+  lockout after failed attempts), served with the panel's own domain
+  certificate by `ragnar-web.service`
+- Dashboard (server info, measured bandwidth, user totals, online,
+  service status), SSH / Xray / ZIVPN user management, Xray links with
+  copy buttons, service restarts, SlowDNS info, password change
+- Single file (`web/webpanel.py`), Python standard library only; all
+  actions go through the same `core/ragnar.py` as the terminal menu.
+  Login is created at install (`--init` prints it once) and can be
+  reset from the terminal menu: **WEB PANEL → RESET ADMIN PASSWORD**
 
 ## Ports
 
@@ -126,6 +141,7 @@ conntrack headroom, `LimitNOFILE` everywhere.
 | 80/tcp | WS — all protocols + SSH-WS (HAProxy) |
 | 443/tcp | WSS + SSH-SSL + AnyTLS SNI (HAProxy) |
 | 8446/tcp | AnyTLS fallback |
+| 2053/tcp | Web panel (HTTPS) |
 | 53 udp/tcp | SlowDNS |
 | 5667/udp (+6000–19999) | ZIVPN |
 | 36712/udp (+20000–65535) | UDP Custom |
@@ -140,6 +156,7 @@ core/ragnar.py     user DBs, config + link generation (stdlib only)
 core/checker.py    expiry / quota / IP-limit enforcer (1-minute timer)
 core/wsproxy.py    SSH-over-WebSocket proxy (stdlib only)
 core/watchdog.sh   dead-service reviver (1-minute timer)
+web/webpanel.py    3x-ui style web panel, HTTPS :2053 (stdlib only)
 configs/           HAProxy front door + sysctl tuning
 tests/             local tests: python3 tests/test_ragnar.py
                    python3 tests/test_wsproxy.py

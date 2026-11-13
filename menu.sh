@@ -23,6 +23,7 @@ bar() { # section header like the reference: purple line + yellow title
     echo -e "${P}└${line}┘${N}"
 }
 kv() { printf "${C}%-14s${W}: ${G}%s${N}\n" "$1" "$2"; }
+opt() { printf "${P}〈${Y}%s${P}〉${W}  %s\n" "$1" "$2"; }
 svc_dot() {
     if systemctl is-active --quiet "$1" 2>/dev/null; then
         echo -e "${G}● ONLINE${N}"
@@ -119,14 +120,21 @@ print_header() {
 main_menu() {
     bar "MAIN MENU"
     echo -e "${P}${B}   USERS${N}"
-    printf "${P}〈${Y}1${P}〉${W}  SSH & SSL        ${P}〈${Y}2${P}〉${W}  XRAY (ALL PROTOCOLS)\n"
-    printf "${P}〈${Y}3${P}〉${W}  UDP ZIVPN        ${P}〈${Y}4${P}〉${W}  UDP CUSTOM\n"
+    opt 1 "SSH & SSL"
+    opt 2 "XRAY (ALL PROTOCOLS)"
+    opt 3 "UDP ZIVPN"
+    opt 4 "UDP CUSTOM"
     echo -e "${P}${B}   SERVICES${N}"
-    printf "${P}〈${Y}5${P}〉${W}  SLOWDNS          ${P}〈${Y}6${P}〉${W}  CLOUDFLARED\n"
-    printf "${P}〈${Y}7${P}〉${W}  STATUS           ${P}〈${Y}8${P}〉${W}  TOOLS\n"
+    opt 5 "SLOWDNS"
+    opt 6 "CLOUDFLARED"
+    opt 7 "WEB PANEL"
+    opt 8 "STATUS"
+    opt 9 "TOOLS"
     echo -e "${P}${B}   SYSTEM${N}"
-    printf "${P}〈${Y}9${P}〉${W}  CLEAR RAM        ${P}〈${Y}10${P}〉${W} REBOOT VPS\n"
-    printf "${P}〈${Y}11${P}〉${W} UNINSTALL        ${P}〈${Y}x${P}〉${W}  EXIT\n"
+    opt 10 "CLEAR RAM"
+    opt 11 "REBOOT VPS"
+    opt 12 "UNINSTALL"
+    opt x "EXIT"
     echo -e "${DIM}   Panel by @farisbazed - https://t.me/ragnaresim${N}"
 }
 
@@ -148,8 +156,12 @@ ssh_info() { local u; read -rp "Username: " u; python3 "$CORE" ssh-info "$u"; pa
 ssh_edit() {
     local u what
     read -rp "Username to edit: " u
-    echo "1) Renew/extend days   2) Set quota GB   3) Set IP limit"
-    echo "4) Change password     5) Enable         6) Disable"
+    echo "1) Renew/extend days"
+    echo "2) Set quota GB"
+    echo "3) Set IP limit"
+    echo "4) Change password"
+    echo "5) Enable"
+    echo "6) Disable"
     read -rp "Choice: " what
     case $what in
         1) read -rp "Add how many days? " v; python3 "$CORE" ssh-edit "$u" --days "$v" --extend ;;
@@ -166,9 +178,12 @@ ssh_del() { local u; read -rp "Username to DELETE: " u
 ssh_menu() {
     while true; do
         print_header; bar "SSH & SSL"
-        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
-        printf "${P}〈${Y}3${P}〉${W}  EDIT / RENEW     ${P}〈${Y}4${P}〉${W}  DELETE USER\n"
-        printf "${P}〈${Y}5${P}〉${W}  USER INFO (TABLE) ${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "CREATE USER"
+        opt 2 "LIST USERS"
+        opt 3 "EDIT / RENEW"
+        opt 4 "DELETE USER"
+        opt 5 "USER INFO"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) ssh_create ;; 2) ssh_list ;; 3) ssh_edit ;;
@@ -206,7 +221,11 @@ xray_copy_one() {
 xray_edit() {
     local u what
     read -rp "Username to edit: " u
-    echo "1) Renew/extend days   2) Set quota GB   3) Set IP limit   4) Enable   5) Disable"
+    echo "1) Renew/extend days"
+    echo "2) Set quota GB"
+    echo "3) Set IP limit"
+    echo "4) Enable"
+    echo "5) Disable"
     read -rp "Choice: " what
     case $what in
         1) read -rp "Add how many days? " v; python3 "$CORE" xray-edit "$u" --days "$v" --extend ;;
@@ -222,10 +241,14 @@ xray_del() { local u; read -rp "Username to DELETE: " u
 xray_menu() {
     while true; do
         print_header; bar "XRAY - ALL PROTOCOLS"
-        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
-        printf "${P}〈${Y}3${P}〉${W}  EDIT / RENEW     ${P}〈${Y}4${P}〉${W}  DELETE USER\n"
-        printf "${P}〈${Y}5${P}〉${W}  USER INFO (TABLE) ${P}〈${Y}6${P}〉${W}  SHOW LINKS\n"
-        printf "${P}〈${Y}7${P}〉${W}  COPY ONE LINK    ${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "CREATE USER"
+        opt 2 "LIST USERS"
+        opt 3 "EDIT / RENEW"
+        opt 4 "DELETE USER"
+        opt 5 "USER INFO"
+        opt 6 "SHOW LINKS"
+        opt 7 "COPY ONE LINK"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) xray_create ;; 2) python3 "$CORE" xray-list; pause ;;
@@ -241,9 +264,12 @@ xray_menu() {
 zivpn_menu() {
     while true; do
         print_header; bar "UDP ZIVPN (port 5667)"
-        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
-        printf "${P}〈${Y}3${P}〉${W}  DELETE USER      ${P}〈${Y}4${P}〉${W}  SERVER INFO\n"
-        printf "${P}〈${Y}5${P}〉${W}  RESTART          ${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "CREATE USER"
+        opt 2 "LIST USERS"
+        opt 3 "DELETE USER"
+        opt 4 "SERVER INFO"
+        opt 5 "RESTART"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) read -rp "Name: " u; read -rp "Password: " p; read -rp "Days: " d
@@ -263,8 +289,9 @@ udpcustom_menu() {
         echo "UDP Custom uses your SSH users (same username/password)."
         echo "Ports  : UDP 1-65535 (excluding panel ports) -> udp-custom :36712"
         echo "Gateway: badvpn-udpgw 127.0.0.1:7300"
-        printf "${P}〈${Y}1${P}〉${W}  RESTART          ${P}〈${Y}2${P}〉${W}  STATUS LOG\n"
-        printf "${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "RESTART"
+        opt 2 "STATUS LOG"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart udp-custom badvpn-udpgw; echo restarted; pause ;;
@@ -288,8 +315,10 @@ slowdns_menu() {
         elif [ "$kcp" = "True" ]; then kcp_txt="ON (turbo binary, KCP nodelay + window 8192)"
         else kcp_txt="OFF (stock binary)"; fi
         echo "KCP Turbo  : $kcp_txt"
-        printf "${P}〈${Y}1${P}〉${W}  RESTART          ${P}〈${Y}2${P}〉${W}  SET NAMESERVER\n"
-        printf "${P}〈${Y}3${P}〉${W}  TOGGLE KCP TURBO ${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "RESTART"
+        opt 2 "SET NAMESERVER"
+        opt 3 "TOGGLE KCP TURBO"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart slowdns; echo restarted; pause ;;
@@ -330,11 +359,11 @@ cloudflared_menu() {
         echo "Cloudflare carries the WS protocols (VLESS/VMESS/Trojan/SSWS/SSH-WS)"
         echo "on ports 80 and 443. AnyTLS is raw TLS and stays direct (CF proxy"
         echo "cannot carry it - that is a Cloudflare limit, not a panel limit)."
-        printf "${P}〈${Y}1${P}〉${W}  SET DOMAIN (for TLS + CF links)\n"
-        printf "${P}〈${Y}2${P}〉${W}  SET CF HOSTNAME USED IN LINKS\n"
-        printf "${P}〈${Y}3${P}〉${W}  INSTALL TUNNEL TOKEN & ENABLE SERVICE\n"
-        printf "${P}〈${Y}4${P}〉${W}  QUICK TUNNEL (trycloudflare, temp hostname)\n"
-        printf "${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "SET DOMAIN (for TLS + CF links)"
+        opt 2 "SET CF HOSTNAME USED IN LINKS"
+        opt 3 "INSTALL TUNNEL TOKEN & ENABLE SERVICE"
+        opt 4 "QUICK TUNNEL (trycloudflare, temp hostname)"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) read -rp "Domain: " v; echo "$v" > "$RAGNAR_DIR/domain"
@@ -363,18 +392,52 @@ PY
 }
 
 # ---------------------------------------------------------------------
+# Web panel (3x-ui style, HTTPS on port 2053)
+# ---------------------------------------------------------------------
+webpanel_menu() {
+    while true; do
+        print_header; bar "WEB PANEL"
+        local dom url
+        dom=$(cat "$RAGNAR_DIR/domain" 2>/dev/null)
+        url="https://${dom:-$(server_ip)}:2053"
+        echo "URL     : $url"
+        printf "Service : %s\n" "$(svc_dot ragnar-web)"
+        echo "Log in with the admin username/password (set at install;"
+        echo "reset it below if you lost it)."
+        opt 1 "SERVICE STATUS"
+        opt 2 "RESET ADMIN PASSWORD"
+        opt 3 "RESTART WEB PANEL"
+        opt 4 "STOP / START WEB PANEL"
+        opt 0 "BACK"
+        read -rp "Choice: " c
+        case $c in
+            1) echo "Open: $url"; systemctl --no-pager status ragnar-web | head -12; pause ;;
+            2) python3 "$RAGNAR_DIR/web/webpanel.py" --reset-password; pause ;;
+            3) systemctl restart ragnar-web; echo restarted; pause ;;
+            4) if systemctl is-active --quiet ragnar-web; then
+                   systemctl stop ragnar-web; echo stopped
+               else systemctl start ragnar-web; echo started; fi; pause ;;
+            0) return ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------
 # Tools / status
 # ---------------------------------------------------------------------
 tools_menu() {
     while true; do
         print_header; bar "TOOLS"
-        printf "${P}〈${Y}1${P}〉${W}  RESTART ALL SERVICES ${P}〈${Y}2${P}〉${W}  BACKUP USERS (tar.gz)\n"
-        printf "${P}〈${Y}3${P}〉${W}  RUN LIMIT CHECKER  ${P}〈${Y}4${P}〉${W}  SPEED TEST\n"
-        printf "${P}〈${Y}5${P}〉${W}  LISTENING PORTS    ${P}〈${Y}0${P}〉${W}  BACK\n"
+        opt 1 "RESTART ALL SERVICES"
+        opt 2 "BACKUP USERS (tar.gz)"
+        opt 3 "RUN LIMIT CHECKER"
+        opt 4 "SPEED TEST"
+        opt 5 "LISTENING PORTS"
+        opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart haproxy xray sing-box ragnar-wsproxy dropbear \
-                   zivpn udp-custom badvpn-udpgw slowdns 2>/dev/null; echo done; pause ;;
+                   zivpn udp-custom badvpn-udpgw slowdns ragnar-web 2>/dev/null; echo done; pause ;;
             2) local f="/root/ragnar-backup-$(date +%F-%H%M).tar.gz"
                tar -czf "$f" -C "$RAGNAR_DIR" db settings.json 2>/dev/null && echo "Saved: $f"; pause ;;
             3) /usr/local/bin/ragnar-check --apply 2>/dev/null || \
@@ -389,7 +452,7 @@ tools_menu() {
 status_page() {
     print_header; bar "STATUS"
     for s in haproxy xray sing-box ragnar-wsproxy dropbear ssh zivpn udp-custom \
-             badvpn-udpgw slowdns cloudflared ragnar-watchdog.timer; do
+             badvpn-udpgw slowdns cloudflared ragnar-web ragnar-watchdog.timer; do
         printf "${C}%-24s${W}: %s${N}\n" "$s" "$(svc_dot $s)"
     done
     echo; bar "BANDWIDTH"; bandwidth_lines
@@ -412,11 +475,12 @@ while true; do
         4) udpcustom_menu ;;
         5) slowdns_menu ;;
         6) cloudflared_menu ;;
-        7) status_page ;;
-        8) tools_menu ;;
-        9) sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo "RAM cleared"; pause ;;
-        10) read -rp "Reboot the VPS now? [y/N] " a; [ "$a" = y ] && reboot ;;
-        11) read -rp "UNINSTALL Ragnar Panel completely? [y/N] " a
+        7) webpanel_menu ;;
+        8) status_page ;;
+        9) tools_menu ;;
+        10) sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo "RAM cleared"; pause ;;
+        11) read -rp "Reboot the VPS now? [y/N] " a; [ "$a" = y ] && reboot ;;
+        12) read -rp "UNINSTALL Ragnar Panel completely? [y/N] " a
             [ "$a" = y ] && bash "$RAGNAR_DIR/uninstall.sh" ;;
         x|X) clear; echo "Bye - @farisbazed / https://t.me/ragnaresim"; exit 0 ;;
     esac
