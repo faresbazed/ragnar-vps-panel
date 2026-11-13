@@ -42,6 +42,26 @@ svc_dot_cf() { # cloudflared only runs once a tunnel token is installed
 }
 pause() { read -rp "Press Enter to continue..." _; }
 
+bandwidth_lines() { # TODAY / MONTH measured traffic, one line each
+    python3 "$CORE" bandwidth 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+def line(label, p):
+    if not p:
+        return "%-6s n/a" % label
+    return "%-6s RX %9s  TX %9s  TOTAL %9s" % (
+        label, p["rx_f"], p["tx_f"], p["total_f"])
+print(line("TODAY", d.get("today")))
+print(line("MONTH", d.get("month")))
+src = d.get("source")
+if src and src != "vnstat":
+    print("(bandwidth source: %s)" % src)
+' | while IFS= read -r l; do echo -e "${C}$l${N}"; done
+}
+
 human() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1 B"; }
 
 server_ip() {
@@ -70,19 +90,11 @@ print_header() {
     kv "IP" "$ip";        kv "ISP" "$isp";       kv "OS" "$os"
     kv "UPTIME" "$up";    kv "CPU USAGE" "${cpu:-n/a}"
     kv "RAM USAGE" "$ram"; kv "DISK USAGE" "$disk"; kv "SERVER TIME" "$now"
-    # bandwidth (vnstat when available)
-    local btoday bmonth
-    if command -v vnstat >/dev/null; then
-        # --oneline fields: 6 = today total, 11 = this month total.
-        # Guard against vnstat's "No data" prose leaking into the header.
-        btoday=$(vnstat --oneline 2>/dev/null | cut -d';' -f6 | grep -E '^[0-9]' || true)
-        bmonth=$(vnstat --oneline 2>/dev/null | cut -d';' -f11 | grep -E '^[0-9]' || true)
-        [ -n "$btoday" ] || btoday=""
-        [ -n "$bmonth" ] || bmonth=""
-    fi
+    # bandwidth: measured totals via the core (vnstat --json for the WAN
+    # interface, matched by date - never positional fields; kernel
+    # counters since boot as a labelled fallback)
     bar "BANDWIDTH"
-    printf "${C}%-14s${W}: ${G}%-18s${C}%-14s${W}: ${G}%s${N}\n" \
-        "TODAY" "${btoday:-n/a}" "MONTH" "${bmonth:-n/a}"
+    bandwidth_lines
     # user stats
     local stats total online
     stats=$(python3 "$CORE" stats 2>/dev/null)
@@ -106,15 +118,15 @@ print_header() {
 
 main_menu() {
     bar "MAIN MENU"
-    printf "${P}〈${Y}1${P}〉${W}  SSH & SSL        ${P}〈${Y}9${P}〉${W}  UDP CUSTOM\n"
-    printf "${P}〈${Y}2${P}〉${W}  VMESS            ${P}〈${Y}10${P}〉${W} SLOWDNS\n"
-    printf "${P}〈${Y}3${P}〉${W}  VLESS            ${P}〈${Y}11${P}〉${W} CLOUDFLARED\n"
-    printf "${P}〈${Y}4${P}〉${W}  TROJAN           ${P}〈${Y}12${P}〉${W} TOOLS\n"
-    printf "${P}〈${Y}5${P}〉${W}  SSWS             ${P}〈${Y}13${P}〉${W} STATUS\n"
-    printf "${P}〈${Y}6${P}〉${W}  ANYTLS           ${P}〈${Y}14${P}〉${W} CLEAR RAM\n"
-    printf "${P}〈${Y}7${P}〉${W}  XRAY (ALL)       ${P}〈${Y}15${P}〉${W} REBOOT VPS\n"
-    printf "${P}〈${Y}8${P}〉${W}  UDP ZIVPN        ${P}〈${Y}16${P}〉${W} UNINSTALL\n"
-    printf "${P}〈${Y}x${P}〉${W}  EXIT\n"
+    echo -e "${P}${B}   USERS${N}"
+    printf "${P}〈${Y}1${P}〉${W}  SSH & SSL        ${P}〈${Y}2${P}〉${W}  XRAY (ALL PROTOCOLS)\n"
+    printf "${P}〈${Y}3${P}〉${W}  UDP ZIVPN        ${P}〈${Y}4${P}〉${W}  UDP CUSTOM\n"
+    echo -e "${P}${B}   SERVICES${N}"
+    printf "${P}〈${Y}5${P}〉${W}  SLOWDNS          ${P}〈${Y}6${P}〉${W}  CLOUDFLARED\n"
+    printf "${P}〈${Y}7${P}〉${W}  STATUS           ${P}〈${Y}8${P}〉${W}  TOOLS\n"
+    echo -e "${P}${B}   SYSTEM${N}"
+    printf "${P}〈${Y}9${P}〉${W}  CLEAR RAM        ${P}〈${Y}10${P}〉${W} REBOOT VPS\n"
+    printf "${P}〈${Y}11${P}〉${W} UNINSTALL        ${P}〈${Y}x${P}〉${W}  EXIT\n"
     echo -e "${DIM}   Panel by @farisbazed - https://t.me/ragnaresim${N}"
 }
 
@@ -154,8 +166,9 @@ ssh_del() { local u; read -rp "Username to DELETE: " u
 ssh_menu() {
     while true; do
         print_header; bar "SSH & SSL"
-        echo "1) Create user    2) List users    3) Edit / renew user"
-        echo "4) Delete user    5) User info (ports, SNI, payloads)    0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
+        printf "${P}〈${Y}3${P}〉${W}  EDIT / RENEW     ${P}〈${Y}4${P}〉${W}  DELETE USER\n"
+        printf "${P}〈${Y}5${P}〉${W}  USER INFO (TABLE) ${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) ssh_create ;; 2) ssh_list ;; 3) ssh_edit ;;
@@ -178,12 +191,16 @@ xray_create() {
     pause
 }
 xray_links() {
-    local u proto; read -rp "Username: " u; proto="${1:-}"
-    if [ -n "$proto" ]; then
-        python3 "$CORE" xray-links "$u" | grep -i "^$proto" || python3 "$CORE" xray-links "$u"
-    else
-        python3 "$CORE" xray-links "$u"
-    fi
+    local u; read -rp "Username: " u
+    python3 "$CORE" xray-links "$u"
+    pause
+}
+xray_info() { local u; read -rp "Username: " u; python3 "$CORE" xray-info "$u"; pause; }
+xray_copy_one() {
+    local u proto
+    read -rp "Username: " u
+    read -rp "Protocol (VLESS/VMESS/TROJAN/SSWS/ANYTLS): " proto
+    python3 "$CORE" xray-links "$u" | grep -i "^$proto" || python3 "$CORE" xray-links "$u"
     pause
 }
 xray_edit() {
@@ -203,18 +220,17 @@ xray_edit() {
 xray_del() { local u; read -rp "Username to DELETE: " u
     read -rp "Are you sure? [y/N] " a; [ "$a" = y ] && python3 "$CORE" xray-del "$u"; pause; }
 xray_menu() {
-    local focus="${1:-ALL}"
     while true; do
-        print_header; bar "XRAY - $focus"
-        echo "1) Create user (all protocols at once)   2) List users"
-        echo "3) Edit / renew user                      4) Delete user"
-        echo "5) Show links                             0) Back"
+        print_header; bar "XRAY - ALL PROTOCOLS"
+        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
+        printf "${P}〈${Y}3${P}〉${W}  EDIT / RENEW     ${P}〈${Y}4${P}〉${W}  DELETE USER\n"
+        printf "${P}〈${Y}5${P}〉${W}  USER INFO (TABLE) ${P}〈${Y}6${P}〉${W}  SHOW LINKS\n"
+        printf "${P}〈${Y}7${P}〉${W}  COPY ONE LINK    ${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) xray_create ;; 2) python3 "$CORE" xray-list; pause ;;
-            3) xray_edit ;; 4) xray_del ;;
-            5) [ "$focus" = ALL ] && xray_links || xray_links "$focus" ;;
-            0) return ;;
+            3) xray_edit ;; 4) xray_del ;; 5) xray_info ;;
+            6) xray_links ;; 7) xray_copy_one ;; 0) return ;;
         esac
     done
 }
@@ -225,8 +241,9 @@ xray_menu() {
 zivpn_menu() {
     while true; do
         print_header; bar "UDP ZIVPN (port 5667)"
-        echo "1) Create user    2) List users    3) Delete user"
-        echo "4) Server info    5) Restart       0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  CREATE USER      ${P}〈${Y}2${P}〉${W}  LIST USERS (TABLE)\n"
+        printf "${P}〈${Y}3${P}〉${W}  DELETE USER      ${P}〈${Y}4${P}〉${W}  SERVER INFO\n"
+        printf "${P}〈${Y}5${P}〉${W}  RESTART          ${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) read -rp "Name: " u; read -rp "Password: " p; read -rp "Days: " d
@@ -246,7 +263,8 @@ udpcustom_menu() {
         echo "UDP Custom uses your SSH users (same username/password)."
         echo "Ports  : UDP 1-65535 (excluding panel ports) -> udp-custom :36712"
         echo "Gateway: badvpn-udpgw 127.0.0.1:7300"
-        echo "1) Restart    2) Status log    0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  RESTART          ${P}〈${Y}2${P}〉${W}  STATUS LOG\n"
+        printf "${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart udp-custom badvpn-udpgw; echo restarted; pause ;;
@@ -270,7 +288,8 @@ slowdns_menu() {
         elif [ "$kcp" = "True" ]; then kcp_txt="ON (turbo binary, KCP nodelay + window 8192)"
         else kcp_txt="OFF (stock binary)"; fi
         echo "KCP Turbo  : $kcp_txt"
-        echo "1) Restart    2) Set nameserver    3) Toggle KCP Turbo    0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  RESTART          ${P}〈${Y}2${P}〉${W}  SET NAMESERVER\n"
+        printf "${P}〈${Y}3${P}〉${W}  TOGGLE KCP TURBO ${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart slowdns; echo restarted; pause ;;
@@ -311,11 +330,11 @@ cloudflared_menu() {
         echo "Cloudflare carries the WS protocols (VLESS/VMESS/Trojan/SSWS/SSH-WS)"
         echo "on ports 80 and 443. AnyTLS is raw TLS and stays direct (CF proxy"
         echo "cannot carry it - that is a Cloudflare limit, not a panel limit)."
-        echo "1) Set domain (for TLS + CF links)"
-        echo "2) Set CF hostname used in links"
-        echo "3) Install named-tunnel token & enable service"
-        echo "4) Start a quick tunnel (trycloudflare, prints a temp hostname)"
-        echo "0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  SET DOMAIN (for TLS + CF links)\n"
+        printf "${P}〈${Y}2${P}〉${W}  SET CF HOSTNAME USED IN LINKS\n"
+        printf "${P}〈${Y}3${P}〉${W}  INSTALL TUNNEL TOKEN & ENABLE SERVICE\n"
+        printf "${P}〈${Y}4${P}〉${W}  QUICK TUNNEL (trycloudflare, temp hostname)\n"
+        printf "${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) read -rp "Domain: " v; echo "$v" > "$RAGNAR_DIR/domain"
@@ -349,9 +368,9 @@ PY
 tools_menu() {
     while true; do
         print_header; bar "TOOLS"
-        echo "1) Restart ALL services      2) Backup users (tar.gz)"
-        echo "3) Run limit checker now     4) Speed test (fast.com via curl)"
-        echo "5) Listening ports           0) Back"
+        printf "${P}〈${Y}1${P}〉${W}  RESTART ALL SERVICES ${P}〈${Y}2${P}〉${W}  BACKUP USERS (tar.gz)\n"
+        printf "${P}〈${Y}3${P}〉${W}  RUN LIMIT CHECKER  ${P}〈${Y}4${P}〉${W}  SPEED TEST\n"
+        printf "${P}〈${Y}5${P}〉${W}  LISTENING PORTS    ${P}〈${Y}0${P}〉${W}  BACK\n"
         read -rp "Choice: " c
         case $c in
             1) systemctl restart haproxy xray sing-box ragnar-wsproxy dropbear \
@@ -373,6 +392,7 @@ status_page() {
              badvpn-udpgw slowdns cloudflared ragnar-watchdog.timer; do
         printf "${C}%-24s${W}: %s${N}\n" "$s" "$(svc_dot $s)"
     done
+    echo; bar "BANDWIDTH"; bandwidth_lines
     echo; ss -tulnp 2>/dev/null | grep -E ':(80|443|22|109|5667|36712|53|8446)\b' || true
     pause
 }
@@ -387,21 +407,16 @@ while true; do
     read -rp "Select menu: " opt
     case $opt in
         1) ssh_menu ;;
-        2) xray_menu VMESS ;;
-        3) xray_menu VLESS ;;
-        4) xray_menu TROJAN ;;
-        5) xray_menu SSWS ;;
-        6) xray_menu ANYTLS ;;
-        7) xray_menu ALL ;;
-        8) zivpn_menu ;;
-        9) udpcustom_menu ;;
-        10) slowdns_menu ;;
-        11) cloudflared_menu ;;
-        12) tools_menu ;;
-        13) status_page ;;
-        14) sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo "RAM cleared"; pause ;;
-        15) read -rp "Reboot the VPS now? [y/N] " a; [ "$a" = y ] && reboot ;;
-        16) read -rp "UNINSTALL Ragnar Panel completely? [y/N] " a
+        2) xray_menu ;;
+        3) zivpn_menu ;;
+        4) udpcustom_menu ;;
+        5) slowdns_menu ;;
+        6) cloudflared_menu ;;
+        7) status_page ;;
+        8) tools_menu ;;
+        9) sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo "RAM cleared"; pause ;;
+        10) read -rp "Reboot the VPS now? [y/N] " a; [ "$a" = y ] && reboot ;;
+        11) read -rp "UNINSTALL Ragnar Panel completely? [y/N] " a
             [ "$a" = y ] && bash "$RAGNAR_DIR/uninstall.sh" ;;
         x|X) clear; echo "Bye - @farisbazed / https://t.me/ragnaresim"; exit 0 ;;
     esac

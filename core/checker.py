@@ -23,6 +23,7 @@ import pwd
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ragnar  # noqa: E402
@@ -130,6 +131,16 @@ def accumulate_usage():
         ragnar._write_json(state_f, deltas)
     if changed:
         ragnar.save_xray(xr)
+    # Last-seen stamps for the ONLINE counter (ragnar.online_users): a user
+    # whose traffic counter moved this minute was active this minute.
+    seen = ragnar._read_json(ragnar.XRAY_LAST_SEEN, {})
+    now = time.time()
+    for email, total in deltas.items():
+        if email in xr and max(0, total - int(prev.get(email, 0))) > 0:
+            seen[email] = now
+    seen = {e: ts for e, ts in seen.items()
+            if now - float(ts) <= 3600}  # prune stamps older than an hour
+    ragnar._write_json(ragnar.XRAY_LAST_SEEN, seen)
     return ssh, xr
 
 

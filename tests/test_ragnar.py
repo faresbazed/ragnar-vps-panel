@@ -101,6 +101,26 @@ st = ragnar.stats()
 check("stats counts", st["ssh"] == 1 and st["vless"] == 1 and st["zivpn"] == 1
       and st["total"] == 3, str(st))
 
+# ONLINE counter: real users, not socket counts -------------------------
+_sample_ss = (
+    'tcp ESTAB 0 0 203.0.113.10:80  1.2.3.4:51234 users:(("wsproxy",pid=111,fd=9))\n'
+    'tcp ESTAB 0 0 203.0.113.10:22  1.2.3.4:51235 users:(("sshd",pid=222,fd=3))\n'
+    'tcp ESTAB 0 0 203.0.113.10:22  5.6.7.8:51236 users:(("dropbear",pid=333,fd=4))\n'
+    'tcp ESTAB 0 0 203.0.113.10:443 9.9.9.9:51237 users:(("haproxy",pid=444,fd=5))\n'
+    'tcp ESTAB 0 0 203.0.113.10:22  1.1.1.1:51238\n')
+check("ssh live parse counts only sshd/dropbear users",
+      ragnar.parse_ssh_live_users(_sample_ss, {222: "alice", 333: "bob"}.get)
+      == ["alice", "bob"])
+import time as _time
+ragnar._write_json(ragnar.XRAY_LAST_SEEN,
+                   {"bob": _time.time(), "ghost": _time.time() - 3600})
+check("xray live counts recent traffic only, stale aged out",
+      ragnar.xray_live_users() == ["bob"])
+on = ragnar.online_users()
+check("online counts distinct users once (bob via xray, no live ssh)",
+      on["online"] == 1 and on["xray_online"] == ["bob"]
+      and on["ssh_online"] == [], str(on))
+
 # ---- human-readable display -------------------------------------------
 _txt = ragnar.fmt_links("bob")
 check("display: fmt_links is not JSON",
@@ -115,8 +135,50 @@ check("display: fmt_users is a table, not JSON",
       _tab.startswith("NAME") and "bob" in _tab and "unlimited" in _tab
       and "{" not in _tab)
 _info = ragnar.fmt_ssh_info("alice") if "alice" in ragnar.load_ssh() else ""
-check("display: fmt_ssh_info readable",
-      _info == "" or ("SSH user : alice" in _info and "{" not in _info))
+check("display: fmt_ssh_info is a bordered table",
+      _info == "" or ("SSH USER: alice" in _info and _info.startswith("+")
+                      and "Used" in _info and "{" not in _info))
+_xinfo = ragnar.fmt_xray_info("bob")
+check("display: fmt_xray_info is a bordered table with usage",
+      "XRAY USER: bob" in _xinfo and "Used" in _xinfo
+      and "Activity" in _xinfo and _xinfo.startswith("+"))
+_tab2 = ragnar.fmt_users({"bob": {"expiry": "2027-01-01", "days_left": 30,
+                                  "quota_gb": 100, "ip_limit": 3,
+                                  "enabled": True,
+                                  "used_bytes": 5 * 1024 ** 3, "live": 2}})
+check("display: fmt_users shows used GB and live count",
+      "5.00 GB" in _tab2 and "USED" in _tab2 and "LIVE" in _tab2)
+
+# ---- bandwidth parsing --------------------------------------------------
+import time as _t
+_lt = _t.localtime()
+_vj = json.dumps({"interfaces": [
+    {"name": "lo", "traffic": {"total": {"rx": 1, "tx": 1}, "day": [], "month": []}},
+    {"name": "ens6", "traffic": {
+        "total": {"rx": 1000, "tx": 2000},
+        "day": [{"date": {"year": _lt.tm_year, "month": _lt.tm_mon,
+                          "day": _lt.tm_mday}, "rx": 300, "tx": 400},
+                {"date": {"year": 2020, "month": 1, "day": 1},
+                 "rx": 9, "tx": 9}],
+        "month": [{"date": {"year": _lt.tm_year, "month": _lt.tm_mon},
+                   "rx": 500, "tx": 600}]}}]})
+_bw = ragnar.parse_vnstat_json(_vj, "ens6")
+check("bandwidth: vnstat json matched by date, not position",
+      _bw["today"] == {"rx": 300, "tx": 400}
+      and _bw["month"] == {"rx": 500, "tx": 600}
+      and _bw["total"] == {"rx": 1000, "tx": 2000}, str(_bw))
+check("bandwidth: unknown iface -> None",
+      ragnar.parse_vnstat_json(_vj, "eth9") is None)
+
+# ---- live connection counts ----------------------------------------------
+_ss_counts = (
+    'tcp ESTAB 0 0 203.0.113.10:109 5.6.7.8:1111 users:(("dropbear",pid=333,fd=4))\n'
+    'tcp ESTAB 0 0 203.0.113.10:109 5.6.7.9:2222 users:(("dropbear",pid=333,fd=5))\n'
+    'tcp ESTAB 0 0 203.0.113.10:22  5.6.7.8:3333 users:(("sshd",pid=222,fd=4))\n')
+_counts = ragnar.parse_ssh_live_counts(
+    _ss_counts, {222: "alice", 333: "bob"}.get)
+check("live: per-user connection counts",
+      _counts == {"alice": 1, "bob": 2}, str(_counts))
 
 print()
 if failures:

@@ -20,8 +20,11 @@ import base64
 import datetime as _dt
 import json
 import os
+import pwd
+import re
 import subprocess
 import sys
+import time
 import uuid as _uuid
 
 VERSION = "1.0.0"
@@ -33,6 +36,11 @@ DB_DIR = os.path.join(BASE, "db")
 SSH_DB = os.path.join(DB_DIR, "ssh.json")
 XRAY_DB = os.path.join(DB_DIR, "xray.json")
 ZIVPN_DB = os.path.join(DB_DIR, "zivpn.json")
+XRAY_LAST_SEEN = os.path.join(DB_DIR, "xray_last_seen.json")
+# An Xray user counts as online if they moved traffic in the last 5 min.
+# The limit checker runs every minute and refreshes the timestamps, so an
+# actively-connected user stays counted; an idle one ages out honestly.
+XRAY_ONLINE_WINDOW = 300
 SETTINGS = os.path.join(BASE, "settings.json")
 
 # WebSocket paths - one per protocol, all behind the HAProxy front door.
@@ -529,6 +537,210 @@ def stats():
 
 
 # --------------------------------------------------------------------------
+# Server bandwidth (vnstat's measured totals for the WAN interface)
+# --------------------------------------------------------------------------
+def fmt_gb(n):
+    """Bytes -> short human string (1024-based, like vnstat's own report)."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "0 B"
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.2f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{int(n)} B"
+
+
+def _wan_iface():
+    out = subprocess.run("ip route show default 2>/dev/null", shell=True,
+                         capture_output=True, text=True).stdout
+    m = re.search(r"\bdev\s+(\S+)", out)
+    return m.group(1) if m else None
+
+
+def parse_vnstat_json(text, iface, today=None):
+    """Pick today's / this month's / all-time {rx, tx} bytes for `iface`
+    out of `vnstat --json` output. Entries are matched by their date
+    fields, never by position, so a format shuffle cannot silently swap
+    numbers. Returns None when the interface has no data."""
+    lt = time.localtime(today)
+    data = json.loads(text)
+    for entry in data.get("interfaces", []):
+        if entry.get("name") != iface:
+            continue
+        traffic = entry.get("traffic", {})
+
+        def find(period, want):
+            for e in traffic.get(period, []):
+                d = e.get("date", {})
+                if all(d.get(k) == v for k, v in want.items()):
+                    return {"rx": int(e.get("rx", 0)), "tx": int(e.get("tx", 0))}
+            return None
+
+        tot = traffic.get("total") or {}
+        return {
+            "today": find("day", {"year": lt.tm_year, "month": lt.tm_mon,
+                                  "day": lt.tm_mday}),
+            "month": find("month", {"year": lt.tm_year, "month": lt.tm_mon}),
+            "total": {"rx": int(tot.get("rx", 0)), "tx": int(tot.get("tx", 0))},
+        }
+    return None
+
+
+def bandwidth():
+    """Measured server bandwidth for the header / status page.
+
+    Source of truth is vnstat (it keeps a persistent database, so the
+    numbers survive reboots). If vnstat has no data for the WAN
+    interface, fall back to the kernel counters - those only reach back
+    to the last boot, and the result says so in `source`.
+    """
+    iface = _wan_iface()
+    res = {"iface": iface, "source": None, "today": None,
+           "month": None, "total": None}
+    if not iface:
+        return res
+    out = subprocess.run(f"vnstat --json -i {iface} 2>/dev/null", shell=True,
+                         capture_output=True, text=True).stdout
+    parsed = None
+    if out.strip():
+        try:
+            parsed = parse_vnstat_json(out, iface)
+        except ValueError:
+            parsed = None
+    if parsed and (parsed["today"] or parsed["month"]):
+        res.update(parsed)
+        res["source"] = "vnstat"
+    else:
+        try:
+            base = f"/sys/class/net/{iface}/statistics"
+            rx = int(open(os.path.join(base, "rx_bytes")).read())
+            tx = int(open(os.path.join(base, "tx_bytes")).read())
+            res["total"] = {"rx": rx, "tx": tx}
+            res["source"] = "kernel (since boot)"
+        except (OSError, ValueError):
+            pass
+    for period in ("today", "month", "total"):
+        v = res.get(period)
+        if v:
+            v["total_bytes"] = v["rx"] + v["tx"]
+            v["rx_f"] = fmt_gb(v["rx"])
+            v["tx_f"] = fmt_gb(v["tx"])
+            v["total_f"] = fmt_gb(v["rx"] + v["tx"])
+    return res
+
+
+# --------------------------------------------------------------------------
+# Who is actually online (replaces the old "count every TCP socket" number)
+# --------------------------------------------------------------------------
+def parse_ssh_live_counts(ss_output, pid_to_user):
+    """{username: established-session count} for sshd/dropbear processes.
+
+    ss_output is the text of `ss -tnp state established`; pid_to_user maps
+    a process id to its username (or None). Only sshd/dropbear processes
+    count: HAProxy/wsproxy hops, scanners and the admin's own root session
+    are not panel users, so they never inflate this number. A user reached
+    through NPV/WS still counts, because the dropbear child serving them
+    runs as that user.
+    """
+    counts = {}
+    for line in ss_output.splitlines():
+        m = re.search(r'users:\(\("(\w+)",pid=(\d+),fd=\d+\)\)', line)
+        if not m or m.group(1) not in ("sshd", "dropbear"):
+            continue
+        try:
+            name = pid_to_user(int(m.group(2)))
+        except Exception:
+            continue
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def parse_ssh_live_users(ss_output, pid_to_user):
+    """Distinct usernames with an established sshd/dropbear session."""
+    return sorted(parse_ssh_live_counts(ss_output, pid_to_user))
+
+
+def _pid_to_user(pid):
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            uid = int(re.search(r"^Uid:\s+(\d+)", fh.read(), re.M).group(1))
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return None
+
+
+def ssh_live_users():
+    """Panel SSH users with a live session right now (distinct names)."""
+    panel = set(load_ssh())
+    return [u for u in ssh_live_counts() if u in panel]
+
+
+def ssh_live_counts():
+    """{panel SSH user: live established-session count} right now."""
+    out = subprocess.run("ss -tnp state established 2>/dev/null", shell=True,
+                         capture_output=True, text=True).stdout
+    panel = set(load_ssh())
+    return {u: n for u, n in
+            parse_ssh_live_counts(out, _pid_to_user).items() if u in panel}
+
+
+def xray_last_seen_map():
+    """{panel Xray user: last-traffic epoch} from the checker's stamps."""
+    seen = _read_json(XRAY_LAST_SEEN, {})
+    panel = set(load_xray())
+    out = {}
+    for email, ts in seen.items():
+        if email in panel:
+            try:
+                out[email] = float(ts)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def xray_live_users(window=XRAY_ONLINE_WINDOW, now=None):
+    """Panel Xray users who moved traffic within the last `window` seconds.
+
+    Xray runs as one process, so a socket cannot be attributed to a user;
+    the checker stamps each user in db/xray_last_seen.json whenever their
+    traffic counter moves, and this reads those stamps back. An idle-but-
+    connected user ages out after the window — that is the honest limit of
+    this measure, and it is documented in the menu, not hidden.
+    """
+    now = time.time() if now is None else now
+    seen = _read_json(XRAY_LAST_SEEN, {})
+    panel = set(load_xray())
+    live = []
+    for email, ts in seen.items():
+        if email not in panel:
+            continue
+        try:
+            if now - float(ts) <= window:
+                live.append(email)
+        except (TypeError, ValueError):
+            continue
+    return sorted(live)
+
+
+def online_users():
+    """{"online": N, "ssh_online": [...], "xray_online": [...]}.
+
+    N counts distinct panel users once, even if a name exists as both an
+    SSH and an Xray user. ZIVPN users are not included: zivpn exposes no
+    live-session list, so counting them would be guessing.
+    """
+    ssh = ssh_live_users()
+    xray = xray_live_users()
+    return {"online": len(set(ssh) | set(xray)),
+            "ssh_online": ssh, "xray_online": xray}
+
+
+# --------------------------------------------------------------------------
 # System side effects (only used by the on-VPS wrapper commands)
 # --------------------------------------------------------------------------
 def _run(cmd):
@@ -576,14 +788,39 @@ def fmt_links(name):
 
 
 def fmt_users(users):
+    """Aligned user table. Rows may carry `used_bytes` (traffic the
+    checker has accounted) and `live` (a ready-made label: a session
+    count for SSH, 'active' for recently-moving Xray users)."""
     if not users:
         return "No users yet."
-    lines = [f"{'NAME':<16}{'EXPIRES':<12}{'LEFT':<7}{'QUOTA':<11}{'IP LIMIT':<10}STATUS"]
+    head = (f"{'NAME':<15}{'EXPIRES':<11}{'LEFT':<6}{'USED':<10}"
+            f"{'QUOTA':<11}{'LIVE':<7}STATUS")
+    lines = [head, "-" * len(head)]
     for n, u in users.items():
+        used = fmt_gb(u["used_bytes"]) if "used_bytes" in u else "-"
         lines.append(
-            f"{n:<16}{u['expiry']:<12}{str(u['days_left']) + 'd':<7}"
-            f"{_qstr(u['quota_gb']):<11}{_istr(u['ip_limit']):<10}"
+            f"{n:<15}{u['expiry']:<11}{str(u['days_left']) + 'd':<6}"
+            f"{used:<10}{_qstr(u['quota_gb']):<11}"
+            f"{str(u.get('live', '-')):<7}"
             f"{'active' if u.get('enabled', True) else 'DISABLED'}")
+    return "\n".join(lines)
+
+
+def _card(title, rows):
+    """A bordered two-column table for one user's details."""
+    lw, vw = 16, 29
+    edge = "+" + "-" * (lw + 2) + "+" + "-" * (vw + 2) + "+"
+    lines = [edge, f"| {title:<{lw + vw + 3}} |", edge]
+    for label, value in rows:
+        chunks = []
+        text = str(value)
+        while text:
+            chunks.append(text[:vw])
+            text = text[vw:]
+        for i, chunk in enumerate(chunks or [""]):
+            lines.append(f"| {(label if i == 0 else ''):<{lw}} "
+                         f"| {chunk:<{vw}} |")
+    lines.append(edge)
     return "\n".join(lines)
 
 
@@ -598,19 +835,81 @@ def fmt_zivpn_users(users):
 
 def fmt_ssh_info(username):
     i = ssh_info(username)
-    return "\n".join([
-        f"SSH user : {i['username']}",
-        f"Password : {i['password']}",
-        f"Host     : {i['host']}",
-        f"Direct   : SSH port {i['ssh_port']} - Dropbear port {i['dropbear_port']}",
-        f"SSH-WS   : port {i['ws_port']}, path {i['ws_path']} (framed: {i['ws_path_framed']})",
-        f"SSH-WSS  : port {i['wss_port']} (also SSH-SSL, SNI {i['sni']})",
-        f"SlowDNS  : NS {i['slowdns_ns']}",
-        f"           pubkey {i['slowdns_pubkey']}",
-        f"UDP      : ZIVPN port {i['udp_zivpn_port']} - UDP Custom ports {i['udp_custom_port']}",
-        f"Expires  : {i['expiry']} ({i['days_left']} days left)",
-        f"Quota    : {_qstr(i['quota_gb'])} - IP limit: {_istr(i['ip_limit'])}",
+    u = load_ssh()[username]
+    try:
+        live = ssh_live_counts().get(username, 0)
+    except Exception:
+        live = 0
+    return _card(f"SSH USER: {username}", [
+        ("Password", i["password"]),
+        ("Host", i["host"]),
+        ("Direct SSH", f"port {i['ssh_port']}"),
+        ("Dropbear", f"port {i['dropbear_port']}"),
+        ("SSH-WS", f"port {i['ws_port']}  path {i['ws_path']}"),
+        ("SSH-WS framed", i["ws_path_framed"]),
+        ("SSH-WSS / SSL", f"port {i['wss_port']}  SNI {i['sni']}"),
+        ("SlowDNS NS", i["slowdns_ns"]),
+        ("SlowDNS key", i["slowdns_pubkey"]),
+        ("UDP", f"ZIVPN {i['udp_zivpn_port']} - UDP Custom {i['udp_custom_port']}"),
+        ("Expires", f"{i['expiry']} ({i['days_left']} days left)"),
+        ("Quota", _qstr(i["quota_gb"])),
+        ("Used", fmt_gb(u.get("used_bytes", 0))),
+        ("IP limit", _istr(i["ip_limit"])),
+        ("Connections", f"{live} active now"),
+        ("Status", "active" if u.get("enabled", True) else "DISABLED"),
     ])
+
+
+def fmt_xray_info(name):
+    users = load_xray()
+    if name not in users:
+        raise ValueError(f"Xray user '{name}' not found")
+    u = users[name]
+    seen = xray_last_seen_map().get(name)
+    if seen is None:
+        active = "no traffic recorded yet"
+    else:
+        mins = max(0, int((time.time() - seen) // 60))
+        active = ("active now" if time.time() - seen <= XRAY_ONLINE_WINDOW
+                  else f"last traffic {mins} min ago")
+    return _card(f"XRAY USER: {name}", [
+        ("UUID", u["uuid"]),
+        ("Password", u["password"]),
+        ("SS password", u.get("ss_password", "")),
+        ("Protocols", "VLESS VMESS Trojan SSWS AnyTLS"),
+        ("Expires", f"{u['expiry']} ({days_left(u['expiry'])} days left)"),
+        ("Quota", _qstr(u["quota_gb"])),
+        ("Used", fmt_gb(u.get("used_bytes", 0))),
+        ("IP limit", _istr(u["ip_limit"])),
+        ("Activity", active),
+        ("Status", "active" if u.get("enabled", True) else "DISABLED"),
+        ("Links", "Xray menu -> Show links"),
+    ])
+
+
+def _list_rows(kind):
+    """User rows for the list commands / tables: DB fields + the
+    checker's accounted traffic + a live label."""
+    if kind == "ssh":
+        live = ssh_live_counts()
+        return {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
+                    "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
+                    "enabled": u.get("enabled", True),
+                    "used_bytes": int(u.get("used_bytes", 0)),
+                    "live": live.get(n, 0) or "-"}
+                for n, u in load_ssh().items()}
+    if kind == "xray":
+        seen = xray_last_seen_map()
+        now = time.time()
+        return {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
+                    "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
+                    "enabled": u.get("enabled", True),
+                    "used_bytes": int(u.get("used_bytes", 0)),
+                    "live": "active" if n in seen
+                    and now - seen[n] <= XRAY_ONLINE_WINDOW else "-"}
+                for n, u in load_xray().items()}
+    return {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"])}
+            for n, u in load_zivpn().items()}
 
 
 # --------------------------------------------------------------------------
@@ -655,10 +954,7 @@ def main(argv):
             ssh_del(args[0]); _run(f"userdel -r {args[0]} 2>/dev/null; true")
             print(f"SSH user '{args[0]}' deleted.")
         elif cmd == "ssh-list":
-            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
-                        "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
-                        "enabled": u.get("enabled", True)}
-                    for n, u in load_ssh().items()}
+            data = _list_rows("ssh")
             _p(data) if "--json" in args else print(fmt_users(data))
         elif cmd == "ssh-info":
             _p(ssh_info(args[0])) if "--json" in args[1:] else print(fmt_ssh_info(args[0]))
@@ -689,13 +985,15 @@ def main(argv):
             xray_del(args[0]); apply_configs()
             print(f"Xray user '{args[0]}' deleted.")
         elif cmd == "xray-list":
-            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"]),
-                        "quota_gb": u["quota_gb"], "ip_limit": u["ip_limit"],
-                        "enabled": u.get("enabled", True)}
-                    for n, u in load_xray().items()}
+            data = _list_rows("xray")
             _p(data) if "--json" in args else print(fmt_users(data))
         elif cmd == "xray-links":
             _p(links_for(args[0])) if "--json" in args[1:] else print(fmt_links(args[0]))
+        elif cmd == "xray-info":
+            if "--json" in args[1:]:
+                _p(load_xray()[args[0]])
+            else:
+                print(fmt_xray_info(args[0]))
         elif cmd == "zivpn-add":
             zivpn_add(args[0], args[1], int(args[2])); apply_configs()
             print(f"ZIVPN user '{args[0]}' created.")
@@ -703,13 +1001,16 @@ def main(argv):
             zivpn_del(args[0]); apply_configs()
             print(f"ZIVPN user '{args[0]}' deleted.")
         elif cmd == "zivpn-list":
-            data = {n: {"expiry": u["expiry"], "days_left": days_left(u["expiry"])}
-                    for n, u in load_zivpn().items()}
+            data = _list_rows("zivpn")
             _p(data) if "--json" in args else print(fmt_zivpn_users(data))
+        elif cmd == "bandwidth":
+            _p(bandwidth())
         elif cmd == "gen-configs":
             apply_configs(); _p({"ok": True})
         elif cmd == "stats":
             _p(stats())
+        elif cmd == "online":
+            _p(online_users())
         elif cmd == "version":
             print(VERSION)
         else:
