@@ -98,19 +98,23 @@ conntrack headroom, `LimitNOFILE` everywhere.
   receive buffer, ports **20000–65535 redirected** to it, badvpn-udpgw
   on 7300, SSH users mirrored as auth entries.
 - **SlowDNS** (DNSTT) — UDP 53 redirected to dnstt on 5300 → SSH.
-  This is the sister panel's implementation
-  ([Ragnar-VPS-Management-Panel](https://github.com/faresbazed/Ragnar-VPS-Management-Panel))
-  **byte-for-byte**: `core/ragnar-slowdns-setup` is that panel's own
-  setup script (turbo-patched dnstt-server build: KCP
-  `SetNoDelay(1, 10, 2, 1)` + `SetWindowSize(1024, 1024)`,
-  turbotunnel `QueueSize = 1024`, smux buffers 4 MB; config files in
-  `/etc/vps-panel/slowdns/`; unit with explicit `-mtu`, default
-  1232). The SlowDNS menu mirrors that panel's manager: nameserver +
-  optional Cloudflare API provisioning, diagnostic, SSH backend
-  switch (OpenSSH 22 ⇄ Dropbear 109), resolver, MTU, key
-  regeneration, and the turbo preset (rebuild + MTU 1400 + Dropbear
-  backend). Upgrades seed the config dir from the previous install,
-  so the keypair — and every app profile using it — is preserved.
+  The sister panel's implementation
+  ([Ragnar-VPS-Management-Panel](https://github.com/faresbazed/Ragnar-VPS-Management-Panel)),
+  integrated by `core/slowdns-setup.sh` (their verbatim script is
+  kept at `core/ragnar-slowdns-setup` for reference): turbo-patched
+  dnstt-server build (KCP `SetNoDelay(1, 10, 2, 1)` +
+  `SetWindowSize(1024, 1024)`, turbotunnel `QueueSize = 1024`,
+  smux buffers 4 MB), their NAT cleanup/assert block, Cloudflare
+  API provisioning and unit shape — with this panel's settings.json
+  as the config store, keys in `/etc/ragnar/slowdns/`, and their
+  `/etc/vps-panel/slowdns/` layout mirrored on every run. The
+  SlowDNS menu mirrors their manager: nameserver + CF token,
+  diagnostic, SSH backend switch (OpenSSH 22 ⇄ Dropbear 109),
+  resolver, MTU, key regeneration, and the turbo preset (rebuild +
+  Dropbear backend + MTU 1232). MTU defaults to 1232 on purpose:
+  the server `-mtu` is also the minimum EDNS size demanded from
+  requesters, and a measured carrier path advertising 1395 bytes
+  was FORMERR-rejected at MTU 1400, dropping sessions every minute.
 
 ### Panel
 - Header: VPS IP, ISP, OS, uptime, CPU/RAM/disk, server time, bandwidth,
