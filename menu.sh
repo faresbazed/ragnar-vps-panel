@@ -398,8 +398,9 @@ webpanel_menu() {
     while true; do
         print_header; bar "WEB PANEL"
         local dom url
-        dom=$(cat "$RAGNAR_DIR/domain" 2>/dev/null)
-        url="https://${dom:-$(server_ip)}:2053"
+        dom=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('domain',''))" 2>/dev/null)
+        [ -z "$dom" ] && dom=$(server_ip)
+        url="https://$dom/panel"
         echo "URL     : $url"
         printf "Service : %s\n" "$(svc_dot ragnar-web)"
         echo "Log in with the admin username/password (set at install;"

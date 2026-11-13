@@ -569,6 +569,9 @@ After=network.target
 [Service]
 Type=simple
 Environment=RAGNAR_DIR=/etc/ragnar
+Environment=RAGNAR_WEB_BIND=127.0.0.1
+Environment=RAGNAR_WEB_NO_TLS=1
+Environment=RAGNAR_WEB_BASE=/panel
 ExecStart=/usr/bin/python3 /etc/ragnar/web/webpanel.py
 Restart=on-failure
 RestartSec=3
@@ -589,8 +592,10 @@ cat <<EOF
 =====================================================================
   $PANEL installed.
   Open the panel with:      menu        (or: ragnar)
-  Web panel (HTTPS)   :     https://<your-domain>:2053
-                            (login printed above by --init; reset any
+  Web panel (HTTPS)   :     https://<your-domain>/panel
+                            (served through HAProxy on 443, so it works
+                            even where the provider firewalls port 2053;
+                            login printed above by --init; reset any
                             time from menu > WEB PANEL > RESET ADMIN
                             PASSWORD)
 

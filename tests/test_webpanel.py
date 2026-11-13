@@ -102,6 +102,43 @@ ragnar.xray_add('xuser', 30, 0, 0)
         self.assertIn("vless://", links)
         self.assertIn("anytls://", links)
 
+    def test_base_path_mode(self):
+        """The HAProxy-fronted setup: app under /panel, loopback, HTTP."""
+        import urllib.parse
+        env = dict(os.environ, RAGNAR_DIR=self.tmp,
+                   RAGNAR_WEB_PORT="18100", RAGNAR_WEB_BIND="127.0.0.1",
+                   RAGNAR_WEB_NO_TLS="1", RAGNAR_WEB_BASE="/panel",
+                   RAGNAR_HOST="203.0.113.7", RAGNAR_DOMAIN="example.com")
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(ROOT, "web", "webpanel.py")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True)
+        try:
+            base = "http://127.0.0.1:18100/panel"
+            for _ in range(50):
+                try:
+                    page = urllib.request.urlopen(base + "/login",
+                                                  timeout=1).read().decode()
+                    break
+                except Exception:
+                    time.sleep(0.2)
+            else:
+                raise RuntimeError("base-path server did not start")
+            self.assertIn('action="/panel/login"', page)
+            op = self.opener()
+            data = urllib.parse.urlencode(
+                {"username": "admin", "password": "testpass123"}).encode()
+            op.open(base + "/login", data=data)
+            dash = op.open(base + "/").read().decode()
+            self.assertIn("Dashboard", dash)
+            self.assertIn('href="/panel/ssh"', dash)
+            ssh_page = op.open(base + "/ssh").read().decode()
+            self.assertIn("webuser", ssh_page)
+            self.assertIn('action="/panel/ssh/action"', ssh_page)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

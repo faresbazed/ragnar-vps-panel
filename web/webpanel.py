@@ -2,10 +2,15 @@
 """
 Ragnar Web Panel - a 3x-ui style web UI for the Ragnar VPS panel.
 
-Single file, Python standard library only. Serves HTTPS on port 2053
-(3x-ui's port) using the panel's own domain certificate
-(<RAGNAR_DIR>/certs/fullchain.pem + privkey.pem); falls back to plain
-HTTP only when no certificate exists (first install / tests).
+Single file, Python standard library only. Two serving modes:
+  * fronted (what install.sh sets up): plain HTTP on 127.0.0.1:2053
+    under the /panel prefix, reached as https://<domain>/panel through
+    HAProxy on 443 - providers like IONOS firewall inbound 2053 before
+    it ever reaches the box, but 443 is always open.
+  * direct: HTTPS on port 2053 (3x-ui's port) with the panel's own
+    domain certificate (<RAGNAR_DIR>/certs/fullchain.pem + privkey.pem).
+Env switches: RAGNAR_WEB_BASE, RAGNAR_WEB_BIND, RAGNAR_WEB_NO_TLS,
+RAGNAR_WEB_PORT.
 
 All user management goes through core/ragnar.py - the same functions
 the terminal menu uses - so the two UIs can never drift apart.
@@ -38,6 +43,15 @@ import ragnar  # noqa: E402
 BASE = ragnar.BASE
 WEB_JSON = os.path.join(BASE, "web.json")
 DEFAULT_PORT = 2053
+# When fronted by HAProxy the app lives under a path prefix on the main
+# HTTPS port (2053 direct is blocked by some providers' firewalls):
+#   RAGNAR_WEB_BASE=/panel  RAGNAR_WEB_BIND=127.0.0.1  RAGNAR_WEB_NO_TLS=1
+BASE_PATH = os.environ.get("RAGNAR_WEB_BASE", "").rstrip("/")
+
+
+def U(path):
+    """Public URL for an app path, honouring the HAProxy prefix."""
+    return BASE_PATH + path
 SESSION_TTL = 12 * 3600
 SERVICES = ["haproxy", "xray", "sing-box", "ragnar-wsproxy", "dropbear",
             "ssh", "zivpn", "udp-custom", "badvpn-udpgw", "slowdns",
@@ -268,10 +282,11 @@ h3 { margin: 20px 0 8px; font-size: 15px; color: #c4b5fd; }
 
 
 def layout(title, active, body, flash=""):
-    nav = [("/", "dashboard", "Dashboard"), ("/ssh", "ssh", "SSH & SSL"),
-           ("/xray", "xray", "Xray"), ("/zivpn", "zivpn", "ZIVPN"),
-           ("/services", "services", "Services"),
-           ("/settings", "settings", "Settings"), ("/logout", "", "Logout")]
+    nav = [(U("/"), "dashboard", "Dashboard"), (U("/ssh"), "ssh", "SSH & SSL"),
+           (U("/xray"), "xray", "Xray"), (U("/zivpn"), "zivpn", "ZIVPN"),
+           (U("/services"), "services", "Services"),
+           (U("/settings"), "settings", "Settings"),
+           (U("/logout"), "", "Logout")]
     links = "".join(
         f'<a href="{href}" class="{"on" if key == active else ""}">'
         f'<span>{label}</span></a>' for href, key, label in nav)
@@ -292,7 +307,7 @@ def login_page(error=""):
 <title>Login - Ragnar Panel</title><style>{CSS}</style></head>
 <body><div class="login-wrap"><div class="login-card">
 <h1>RAGNAR</h1><p>VPS Management Panel</p>{err}
-<form method="post" action="/login">
+<form method="post" action="{U('/login')}">
 <label>Username</label><input name="username" autocomplete="username" required>
 <label>Password</label><input name="password" type="password"
 autocomplete="current-password" required>
@@ -314,7 +329,7 @@ def user_table(rows, kind, csrf):
         else:
             status = '<span class="pill b">active</span>'
         toggle = "enable" if not u.get("enabled", True) else "disable"
-        links = (f'<a class="btn sm grey" href="/xray/links?u={esc(name)}">Links</a> '
+        links = (f'<a class="btn sm grey" href="{U("/xray/links")}?u={esc(name)}">Links</a> '
                  if kind == "xray" else "")
         out.append(
             f"<tr><td><b>{esc(name)}</b></td><td>{esc(u['expiry'])}</td>"
@@ -322,7 +337,7 @@ def user_table(rows, kind, csrf):
             f"<td>{esc(fmt_quota(u))}</td>"
             f"<td>{esc(u.get('ip_limit') or '∞')}</td><td>{status}</td>"
             f'<td style="white-space:nowrap">{links}'
-            f'<form class="inline" method="post" action="/{kind}/action">'
+            f'<form class="inline" method="post" action="{U("/" + kind + "/action")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="user" value="{esc(name)}">'
             f'<button class="btn sm grey" name="op" value="renew30">+30d</button> '
@@ -341,7 +356,7 @@ def add_user_form(kind, csrf):
              '<div><label>IP limit (0 = unlimited)</label>'
              '<input name="iplimit" type="number" value="0" min="0"></div>'
              if kind in ("ssh", "xray") else "")
-    return f"""<form class="addform" method="post" action="/{kind}/action">
+    return f"""<form class="addform" method="post" action="{U('/' + kind + '/action')}">
 <input type="hidden" name="csrf" value="{csrf}">
 <div><label>Username</label><input name="user" required></div>{pw}
 <div><label>Days</label><input name="days" type="number" value="30" min="1"></div>
@@ -393,7 +408,7 @@ def page_users(kind, csrf, flash=""):
         body = "".join(
             f"<tr><td><b>{esc(n)}</b></td><td>{esc(u['expiry'])}</td>"
             f"<td>{esc(u['days_left'])}d</td>"
-            f'<td><form class="inline" method="post" action="/zivpn/action">'
+            f'<td><form class="inline" method="post" action="{U("/zivpn/action")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="user" value="{esc(n)}">'
             f'<button class="btn sm red" name="op" value="delete" '
@@ -428,7 +443,7 @@ def page_services(csrf, flash=""):
             f'<tr><td>{esc(s)}</td><td><span class="dot '
             f'{"on-dot" if on else "off-dot"}"></span>'
             f'{"ONLINE" if on else "OFFLINE"}</td>'
-            f'<td><form class="inline" method="post" action="/services/restart">'
+            f'<td><form class="inline" method="post" action="{U("/services/restart")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="unit" value="{esc(s)}">'
             f'<button class="btn sm grey">Restart</button></form></td></tr>')
@@ -446,7 +461,7 @@ def page_services(csrf, flash=""):
 def page_settings(csrf, flash=""):
     cfg = load_web_cfg()
     body = f"""<div class="card" style="max-width:520px">
-<form method="post" action="/settings/password">
+<form method="post" action="{U('/settings/password')}">
 <input type="hidden" name="csrf" value="{csrf}">
 <div class="k">Web panel login</div>
 <p style="margin:10px 0">Username: <b>{esc(cfg['username'])}</b> -
@@ -565,25 +580,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authed(self):
         if not self._session():
-            self._redirect("/login")
+            self._redirect(U("/login"))
             return False
         return True
+
+    def _route_path(self):
+        p = urllib.parse.urlparse(self.path).path
+        if BASE_PATH and (p == BASE_PATH or p.startswith(BASE_PATH + "/")):
+            p = p[len(BASE_PATH):] or "/"
+        return p
 
     def _csrf_ok(self, form):
         return hmac.compare_digest(form.get("csrf", ""),
                                    csrf_token(self._session_token()))
 
     def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
+        path = self._route_path()
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         flash = qs.get("msg", [""])[0]
         if path == "/login":
             if self._session():
-                return self._redirect("/")
+                return self._redirect(U("/"))
             return self._send(200, login_page())
         if path == "/logout":
             return self._redirect(
-                "/login", "ragnar_session=; Max-Age=0; Path=/; HttpOnly")
+                U("/login"), "ragnar_session=; Max-Age=0; Path=/; HttpOnly")
         if not self._authed():
             return
         csrf = csrf_token(self._session_token())
@@ -604,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, f"Error: {esc(exc)}")
 
     def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path
+        path = self._route_path()
         form = self._form()
         if path == "/login":
             ip = self.client_address[0]
@@ -614,8 +635,8 @@ class Handler(BaseHTTPRequestHandler):
                 token = make_session(form["username"])
                 secure = "; Secure" if self.server.tls else ""
                 return self._redirect(
-                    "/", f"ragnar_session={token}; Path=/; HttpOnly; "
-                         f"SameSite=Lax; Max-Age={SESSION_TTL}{secure}")
+                    U("/"), f"ragnar_session={token}; Path=/; HttpOnly; "
+                            f"SameSite=Lax; Max-Age={SESSION_TTL}{secure}")
             note_login_failure(ip)
             time.sleep(0.7)
             return self._send(401, login_page("Wrong username or password."))
@@ -626,50 +647,52 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/ssh/action", "/xray/action", "/zivpn/action"):
             kind = path.split("/")[1]
             msg = do_user_action(kind, form)
-            return self._redirect(f"/{kind}?msg={urllib.parse.quote(msg)}")
+            return self._redirect(U(f"/{kind}") + "?msg=" + urllib.parse.quote(msg))
         if path == "/services/restart":
             unit = form.get("unit", "")
             if unit in SERVICES:
                 subprocess.run(["systemctl", "restart", unit],
                                capture_output=True)
                 return self._redirect(
-                    f"/services?msg={urllib.parse.quote(unit + ' restarted')}")
+                    U("/services") + "?msg=" + urllib.parse.quote(unit + " restarted"))
             return self._send(400, "Unknown service")
         if path == "/settings/password":
             if not check_password(load_web_cfg()["username"],
                                   form.get("current", "")):
-                return self._redirect("/settings?msg=Current password is wrong")
+                return self._redirect(U("/settings") + "?msg=Current password is wrong")
             newuser = form.get("newuser", "").strip() or load_web_cfg()["username"]
             set_password(newuser, form["new"])
             return self._redirect(
-                "/login", "ragnar_session=; Max-Age=0; Path=/; HttpOnly")
+                U("/login"), "ragnar_session=; Max-Age=0; Path=/; HttpOnly")
         self._send(404, "Not found")
 
 
 def serve():
     cfg = load_web_cfg()
     port = int(os.environ.get("RAGNAR_WEB_PORT", cfg.get("port", DEFAULT_PORT)))
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    bind = os.environ.get("RAGNAR_WEB_BIND", "0.0.0.0")
+    httpd = ThreadingHTTPServer((bind, port), Handler)
     httpd.tls = False
-    cert = os.path.join(BASE, "certs", "fullchain.pem")
-    key = os.path.join(BASE, "certs", "privkey.pem")
-    combo = os.path.join(BASE, "certs", "haproxy.pem")
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    try:
-        if os.path.exists(cert) and os.path.exists(key):
-            ctx.load_cert_chain(cert, key)
-        elif os.path.exists(combo):
-            ctx.load_cert_chain(combo, combo)
-        else:
+    ctx = None
+    if not os.environ.get("RAGNAR_WEB_NO_TLS"):
+        cert = os.path.join(BASE, "certs", "fullchain.pem")
+        key = os.path.join(BASE, "certs", "privkey.pem")
+        combo = os.path.join(BASE, "certs", "haproxy.pem")
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            if os.path.exists(cert) and os.path.exists(key):
+                ctx.load_cert_chain(cert, key)
+            elif os.path.exists(combo):
+                ctx.load_cert_chain(combo, combo)
+            else:
+                ctx = None
+        except ssl.SSLError:
             ctx = None
-    except ssl.SSLError:
-        ctx = None
     if ctx is not None:
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         httpd.tls = True
-    print(f"Ragnar web panel on port {port} "
-          f"({'HTTPS' if httpd.tls else 'HTTP - no certificate found!'})",
-          flush=True)
+    print(f"Ragnar web panel on {bind}:{port}{BASE_PATH} "
+          f"({'HTTPS' if httpd.tls else 'HTTP'})", flush=True)
     httpd.serve_forever()
 
 
