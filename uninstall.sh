@@ -62,7 +62,8 @@ netfilter-persistent save >/dev/null 2>&1 || true
 rm -f /etc/sysctl.d/99-ragnar-tuning.conf /etc/ssh/sshd_config.d/60-ragnar.conf
 rm -f /usr/local/bin/menu /usr/local/bin/ragnar /usr/local/bin/zivpn \
       /usr/local/bin/udp-custom /usr/local/bin/dnstt-server /usr/local/bin/sldns-server /usr/local/bin/sldns-server-kcp /usr/local/bin/udpgw \
-      /usr/local/bin/badvpn-udpgw
+      /usr/local/bin/badvpn-udpgw /usr/local/bin/ragnar-slowdns-setup
+rm -rf /etc/vps-panel
 
 if [ -f "$BASE/db/ssh.json" ]; then
     echo "Panel SSH users:"

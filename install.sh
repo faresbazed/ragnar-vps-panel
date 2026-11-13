@@ -97,7 +97,7 @@ install -m 755 "$SRC/core/ragnar.py"   "$BASE/core/ragnar.py"
 install -m 755 "$SRC/core/checker.py"  "$BASE/core/checker.py"
 install -m 755 "$SRC/core/wsproxy.py"  "$BASE/core/wsproxy.py"
 install -m 755 "$SRC/core/watchdog.sh" "$BASE/core/watchdog.sh"
-install -m 755 "$SRC/core/slowdns-setup.sh" "$BASE/core/slowdns-setup.sh"
+install -m 755 "$SRC/core/ragnar-slowdns-setup" /usr/local/bin/ragnar-slowdns-setup
 install -m 755 "$SRC/menu.sh"          "$BASE/menu.sh"
 install -m 755 "$SRC/uninstall.sh"     "$BASE/uninstall.sh"
 install -m 755 "$SRC/web/webpanel.py"  "$BASE/web/webpanel.py"
@@ -403,16 +403,51 @@ iptables -t nat -C POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP
     iptables -t nat -A POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+')" -j MASQUERADE
 
 # ---------------------------------------------------------------------
-# SlowDNS - the dnstt-server implementation from
-# faresbazed/Ragnar-VPS-Management-Panel: a turbo-patched build
-# (KCP NoDelay(1, 10, 2, 1), window 1024, QueueSize 1024, 4 MB smux
-# buffers) with a systemd unit that takes -mtu from settings
-# (default 1232). core/slowdns-setup.sh builds the binary,
-# preserves/generates the keypair, writes the unit and restarts the
-# service; the SlowDNS menu re-runs it when NS/MTU/resolver change.
+# SlowDNS - REPLACED WHOLESALE on 2026-11-13 at the user's request:
+# the implementation from faresbazed/Ragnar-VPS-Management-Panel,
+# byte-for-byte. core/ragnar-slowdns-setup is the other panel's own
+# setup script, extracted verbatim (it builds the turbo-patched
+# dnstt-server, manages keys + config files in /etc/vps-panel/slowdns/,
+# writes the slowdns unit and restarts it). The only glue here is
+# seeding that config dir from this panel's existing SlowDNS identity
+# (so an upgrade keeps the same keypair/nameserver) and mirroring the
+# resulting public key back into settings.json for other displays.
 # ---------------------------------------------------------------------
-RAGNAR_DIR="$BASE" bash "$BASE/core/slowdns-setup.sh" || \
-    warn "SlowDNS setup failed - re-run: RAGNAR_DIR=$BASE bash $BASE/core/slowdns-setup.sh"
+mkdir -p /etc/vps-panel/slowdns
+for f in server.key server.pub; do
+    if [ ! -s "/etc/vps-panel/slowdns/$f" ] && [ -s "$BASE/slowdns/$f" ]; then
+        cp "$BASE/slowdns/$f" "/etc/vps-panel/slowdns/$f"
+    fi
+done
+chmod 600 /etc/vps-panel/slowdns/server.key 2>/dev/null || true
+python3 - <<'PYEOF2'
+import json, os
+base = "/etc/vps-panel/slowdns"
+p = "/etc/ragnar/settings.json"
+s = json.load(open(p)) if os.path.exists(p) else {}
+seed = {
+    "nameserver": s.get("ns") or "",
+    "mtu": str(s.get("slowdns_mtu") or "1232"),
+    "dns_resolver": s.get("slowdns_resolver") or "1.1.1.1",
+    "target_port": str(s.get("slowdns_target") or "22"),
+}
+for name, val in seed.items():
+    fp = os.path.join(base, name)
+    if val and not (os.path.exists(fp) and os.path.getsize(fp) > 0):
+        open(fp, "w").write(val + "\n")
+PYEOF2
+# Their installer's own invocation: NS, no CF token, MTU 1232.
+/usr/local/bin/ragnar-slowdns-setup "${NS:-}" "" "1232" || \
+    warn "SlowDNS setup failed - re-run: /usr/local/bin/ragnar-slowdns-setup"
+python3 - <<'PYEOF3'
+import json, os
+p = "/etc/ragnar/settings.json"
+s = json.load(open(p)) if os.path.exists(p) else {}
+pub = "/etc/vps-panel/slowdns/server.pub"
+if os.path.exists(pub):
+    s["slowdns_pubkey"] = open(pub).read().strip()
+json.dump(s, open(p, "w"), indent=2)
+PYEOF3
 
 # ---------------------------------------------------------------------
 # Cloudflared

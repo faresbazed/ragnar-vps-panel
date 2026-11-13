@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -euo pipefail
+NS_DOMAIN="${1:-}"
+CF_TOKEN="${2:-}"
+MTU_VAL="${3:-}"
+CUSTOM_DNS="${4:-}"
+SSH_TARGET_PORT="${5:-}"
+SLOWDNS_DIR="/etc/vps-panel/slowdns"
+mkdir -p "${SLOWDNS_DIR}"
+
+# 1. Optimize OpenSSH, Dropbear & Kernel UDP Buffers for maximum SlowDNS throughput
+sysctl -w net.core.rmem_default=16777216 >/dev/null 2>&1 || true
+sysctl -w net.core.wmem_default=16777216 >/dev/null 2>&1 || true
+sysctl -w net.core.rmem_max=33554432 >/dev/null 2>&1 || true
+sysctl -w net.core.wmem_max=33554432 >/dev/null 2>&1 || true
+sysctl -w net.core.netdev_max_backlog=16384 >/dev/null 2>&1 || true
+
+if [[ -f /etc/ssh/sshd_config ]]; then
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
+    sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || true
+    sed -i 's/^#*UseDNS.*/UseDNS no/' /etc/ssh/sshd_config || true
+    sed -i 's/^#*GSSAPIAuthentication.*/GSSAPIAuthentication no/' /etc/ssh/sshd_config || true
+    sed -i 's/^#*Compression.*/Compression delayed/' /etc/ssh/sshd_config || true
+    grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+    grep -q "^UseDNS no" /etc/ssh/sshd_config || echo "UseDNS no" >> /etc/ssh/sshd_config
+    grep -q "^GSSAPIAuthentication no" /etc/ssh/sshd_config || echo "GSSAPIAuthentication no" >> /etc/ssh/sshd_config
+    grep -q "^Compression" /etc/ssh/sshd_config || echo "Compression delayed" >> /etc/ssh/sshd_config
+    grep -q "^MaxStartups" /etc/ssh/sshd_config || echo "MaxStartups 100:30:200" >> /etc/ssh/sshd_config
+    rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf /etc/ssh/sshd_config.d/60-cloudimg-settings.conf 2>/dev/null || true
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+fi
+
+# 2. Build Turbo-Patched dnstt-server (KCP NoDelay=1, 10ms interval, fast resend=2, 1024 window, 4MB smux buffer)
+if [[ ! -x /usr/local/bin/dnstt-server || ! -f "${SLOWDNS_DIR}/.turbo_kcp_patched" ]]; then
+    echo "Compiling Turbo-Optimized dnstt-server (KCP NoDelay + 1024 Window + 4MB SMUX buffer)..."
+    DNSTT_TMP=$(mktemp -d)
+    git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git "${DNSTT_TMP}/dnstt" 2>/dev/null || \
+        git clone --depth 1 https://github.com/Mygod/dnstt.git "${DNSTT_TMP}/dnstt"
+    if [[ -f "${DNSTT_TMP}/dnstt/turbotunnel/consts.go" ]]; then
+        sed -i 's/QueueSize.*=.*/QueueSize = 1024/' "${DNSTT_TMP}/dnstt/turbotunnel/consts.go" || true
+    fi
+    if [[ -f "${DNSTT_TMP}/dnstt/dnstt-server/main.go" ]]; then
+        sed -i 's/MaxStreamBuffer = .*/MaxStreamBuffer = 4 * 1024 * 1024\n\tsmuxConfig.MaxReceiveBuffer = 4 * 1024 * 1024/' "${DNSTT_TMP}/dnstt/dnstt-server/main.go" || true
+        sed -i 's/if rc := conn.SetMtu(mtu); !rc {/conn.SetNoDelay(1, 10, 2, 1)\n\t\tconn.SetWindowSize(1024, 1024)\n\t\tif rc := conn.SetMtu(mtu); !rc {/' "${DNSTT_TMP}/dnstt/dnstt-server/main.go" || true
+    fi
+    pushd "${DNSTT_TMP}/dnstt/dnstt-server" >/dev/null
+    go build -ldflags="-s -w" -o /usr/local/bin/dnstt-server .
+    chmod +x /usr/local/bin/dnstt-server
+    touch "${SLOWDNS_DIR}/.turbo_kcp_patched"
+    popd >/dev/null
+    rm -rf "${DNSTT_TMP}"
+fi
+
+# 3. Generate persistent 64-char hex keypair if not present
+if [[ ! -s "${SLOWDNS_DIR}/server.key" || ! -s "${SLOWDNS_DIR}/server.pub" ]]; then
+    /usr/local/bin/dnstt-server -gen-key \
+        -privkey-file "${SLOWDNS_DIR}/server.key" \
+        -pubkey-file "${SLOWDNS_DIR}/server.pub"
+    chmod 600 "${SLOWDNS_DIR}/server.key"
+fi
+
+[[ -n "${NS_DOMAIN}" ]] && echo "${NS_DOMAIN}" > "${SLOWDNS_DIR}/nameserver"
+[[ -n "${MTU_VAL}" ]] && echo "${MTU_VAL}" > "${SLOWDNS_DIR}/mtu"
+[[ -n "${CUSTOM_DNS}" ]] && echo "${CUSTOM_DNS}" > "${SLOWDNS_DIR}/dns_resolver"
+[[ -n "${SSH_TARGET_PORT}" ]] && echo "${SSH_TARGET_PORT}" > "${SLOWDNS_DIR}/target_port"
+
+ACTIVE_NS=$(cat "${SLOWDNS_DIR}/nameserver" 2>/dev/null || echo "")
+ACTIVE_MTU=$(cat "${SLOWDNS_DIR}/mtu" 2>/dev/null || echo "1232")
+ACTIVE_DNS=$(cat "${SLOWDNS_DIR}/dns_resolver" 2>/dev/null || echo "1.1.1.1")
+ACTIVE_TARGET=$(cat "${SLOWDNS_DIR}/target_port" 2>/dev/null || echo "22")
+SYS_DNS_IP=$(echo "${ACTIVE_DNS}" | cut -d':' -f1)
+
+# 4. Optional automatic Cloudflare DNS provisioning (creates A record + NS record)
+if [[ -n "${CF_TOKEN}" && -n "${ACTIVE_NS}" ]]; then
+    VPS_IP=$(curl -fsSL4 --max-time 3 icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    ROOT_DOM=$(echo "${ACTIVE_NS}" | awk -F. '{if (NF>=2) print $(NF-1)"."$NF; else print $0}')
+    A_HOST="dns.${ROOT_DOM}"
+    echo "Configuring Cloudflare DNS records for SlowDNS: ${ACTIVE_NS} -> ${A_HOST} (${VPS_IP})..."
+    ZONE_ID=$(curl -fsSL -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+        "https://api.cloudflare.com/client/v4/zones?name=${ROOT_DOM}" 2>/dev/null | jq -r '.result[0].id // empty' || true)
+    if [[ -n "${ZONE_ID}" ]]; then
+        OLD_A=$(curl -fsSL -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=A&name=${A_HOST}" 2>/dev/null | jq -r '.result[0].id // empty' || true)
+        [[ -n "${OLD_A}" ]] && curl -fsSL -X DELETE -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${OLD_A}" >/dev/null 2>&1 || true
+
+        curl -fsSL -X POST -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+            --data "{\"type\":\"A\",\"name\":\"${A_HOST}\",\"content\":\"${VPS_IP}\",\"ttl\":1,\"proxied\":false}" >/dev/null 2>&1 || true
+
+        OLD_NS=$(curl -fsSL -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=NS&name=${ACTIVE_NS}" 2>/dev/null | jq -r '.result[0].id // empty' || true)
+        [[ -n "${OLD_NS}" ]] && curl -fsSL -X DELETE -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${OLD_NS}" >/dev/null 2>&1 || true
+
+        curl -fsSL -X POST -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+            --data "{\"type\":\"NS\",\"name\":\"${ACTIVE_NS}\",\"content\":\"${A_HOST}\",\"ttl\":1}" >/dev/null 2>&1 || true
+        echo "Cloudflare DNS records created: A (${A_HOST} -> ${VPS_IP}) and NS (${ACTIVE_NS} -> ${A_HOST})!"
+    else
+        echo "Warning: Could not find Cloudflare Zone for ${ROOT_DOM}. Verify your API Token has Zone:Read and DNS:Edit."
+    fi
+fi
+
+# 5. Configure UDP 53 -> 5300 redirection across ALL interfaces (while keeping local 127.0.0.53 DNS working)
+#    Wait: why exclude -d 127.0.0.0/8 from PREROUTING? So local VPS DNS queries are never hijacked,
+#    while ALL external UDP port 53 packets (from 8.8.8.8, 1.1.1.1, 9.9.9.9, ISP DNS, or direct phone IP)
+#    are redirected cleanly to dnstt-server on UDP port 5300!
+iptables -t nat -D PREROUTING -p udp --dport 5300 -j REDIRECT --to-ports 53 2>/dev/null || true
+iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+iptables -t nat -D PREROUTING ! -d 127.0.0.0/8 -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+MAIN_IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -n1)
+if [[ -n "${MAIN_IFACE}" ]]; then
+    iptables -t nat -D PREROUTING -i "${MAIN_IFACE}" -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+fi
+iptables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null || true
+iptables -t nat -I PREROUTING ! -d 127.0.0.0/8 -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+
+ip6tables -t nat -D PREROUTING -p udp --dport 5300 -j REDIRECT --to-ports 53 2>/dev/null || true
+ip6tables -t nat -D PREROUTING ! -d ::1/128 -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+ip6tables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+ip6tables -I INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null || true
+ip6tables -t nat -I PREROUTING ! -d ::1/128 -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+
+if command -v ufw &>/dev/null; then
+    ufw allow 53/udp >/dev/null 2>&1 || true
+    ufw allow 5300/udp >/dev/null 2>&1 || true
+fi
+
+if [[ -z "${ACTIVE_NS}" ]]; then
+    echo "SlowDNS binary and keys prepared. Set your Cloudflare Nameserver in Menu Option 11 to start SlowDNS."
+    exit 0
+fi
+
+# Stop MasterDnsVPN if it was previously occupying UDP port 53
+systemctl stop masterdnsvpn 2>/dev/null || true
+systemctl disable masterdnsvpn 2>/dev/null || true
+
+cat > /etc/systemd/system/slowdns.service <<EOF_SVC
+[Unit]
+Description=Ragnar Turbo SlowDNS (DNSTT) Server (UDP 53 -> 5300 -> 127.0.0.1:${ACTIVE_TARGET}, MTU ${ACTIVE_MTU})
+After=network.target ssh.service dropbear.service
+
+[Service]
+Type=simple
+Nice=-15
+LimitNOFILE=1000000
+ExecStartPre=-/sbin/iptables -I INPUT -p udp --dport 53 -j ACCEPT
+ExecStartPre=-/sbin/iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+ExecStartPre=-/sbin/iptables -t nat -D PREROUTING ! -d 127.0.0.0/8 -p udp --dport 53 -j REDIRECT --to-ports 5300
+ExecStartPre=-/sbin/iptables -t nat -I PREROUTING ! -d 127.0.0.0/8 -p udp --dport 53 -j REDIRECT --to-ports 5300
+ExecStart=/usr/local/bin/dnstt-server -udp :5300 -mtu ${ACTIVE_MTU} -privkey-file /etc/vps-panel/slowdns/server.key ${ACTIVE_NS} 127.0.0.1:${ACTIVE_TARGET}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF_SVC
+
+systemctl daemon-reload
+systemctl enable slowdns
+systemctl restart slowdns

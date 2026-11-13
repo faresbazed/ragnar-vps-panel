@@ -301,44 +301,92 @@ udpcustom_menu() {
     done
 }
 slowdns_menu() {
+    # SlowDNS is the other panel's implementation, byte-for-byte
+    # (/usr/local/bin/ragnar-slowdns-setup, config /etc/vps-panel/slowdns/).
+    # This menu mirrors that panel's SlowDNS manager options.
+    local SD=/etc/vps-panel/slowdns
     while true; do
         print_header; bar "SLOWDNS (DNSTT)"
-        local ns pub mtu resolver
-        ns=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('ns',''))" 2>/dev/null)
-        pub=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('slowdns_pubkey',''))" 2>/dev/null)
-        mtu=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('slowdns_mtu',1232))" 2>/dev/null)
-        resolver=$(python3 -c "import json;print(json.load(open('$RAGNAR_DIR/settings.json')).get('slowdns_resolver','1.1.1.1'))" 2>/dev/null)
+        local ns pub mtu resolver target
+        ns=$(cat "$SD/nameserver" 2>/dev/null)
+        pub=$(cat "$SD/server.pub" 2>/dev/null)
+        mtu=$(cat "$SD/mtu" 2>/dev/null); mtu=${mtu:-1232}
+        resolver=$(cat "$SD/dns_resolver" 2>/dev/null)
+        target=$(cat "$SD/target_port" 2>/dev/null); target=${target:-22}
         echo "Nameserver : ${ns:-not set}"
-        echo "Public key : ${pub:-not set}"
-        echo "Endpoint   : UDP 53 -> dnstt 127.0.0.1:5300 -> SSH 22"
-        echo "MTU        : ${mtu:-1232}"
-        echo "Resolver   : ${resolver:-1.1.1.1} (the DNS your app should use)"
-        if [ -x /usr/local/bin/dnstt-server ]; then
-            echo "Build      : dnstt-server turbo (KCP 10ms, window 1024, smux 4MB)"
+        echo "Public key : ${pub:-not generated}"
+        echo "Endpoint   : UDP 53 -> dnstt 127.0.0.1:5300 -> SSH 127.0.0.1:$target"
+        echo "MTU        : $mtu"
+        if [ -n "$resolver" ]; then
+            case "$resolver" in *:*) echo "Resolver   : $resolver" ;; *) echo "Resolver   : $resolver:53" ;; esac
         else
-            echo "Build      : NOT BUILT (use REAPPLY SETUP)"
+            echo "Resolver   : 1.1.1.1:53 (default)"
         fi
-        opt 1 "RESTART"
-        opt 2 "SET NAMESERVER"
-        opt 3 "SET MTU"
+        if [ -x /usr/local/bin/dnstt-server ]; then
+            echo "Build      : dnstt-server (turbo patch $([ -f "$SD/.turbo_kcp_patched" ] && echo ACTIVE || echo "not applied - use option 7"))"
+        else
+            echo "Build      : NOT INSTALLED (use option 1 or 7)"
+        fi
+        echo "Tip: fastest known setup = MTU 1400 + Dropbear backend (option 7),"
+        echo "     resolver 8.8.8.8:53 (or this server's IP) in the tunnel app."
+        opt 1 "SET NAMESERVER & START"
+        opt 2 "DIAGNOSTIC (NS delegation + listener)"
+        opt 3 "SWITCH SSH BACKEND (22 OpenSSH / 109 Dropbear)"
         opt 4 "SET RESOLVER"
-        opt 5 "REAPPLY SETUP (rebuild / refresh unit)"
+        opt 5 "SET MTU"
+        opt 6 "REGENERATE KEYS"
+        opt 7 "APPLY TURBO PRESET (rebuild + MTU 1400 + Dropbear)"
+        opt 8 "RESTART"
+        opt 9 "STOP SLOWDNS"
         opt 0 "BACK"
         read -rp "Choice: " c
         case $c in
-            1) systemctl restart slowdns; echo restarted; pause ;;
-            2) read -rp "Nameserver (e.g. ns.yourdomain.com): " v
-               RAGNAR_DIR="$RAGNAR_DIR" bash "$RAGNAR_DIR/core/slowdns-setup.sh" "$v"
-               echo "saved - point an NS record for it at this VPS"
+            1) read -rp "Nameserver (e.g. ns.yourdomain.com): " v
+               [ -z "$v" ] && { echo "Nameserver cannot be empty"; pause; continue; }
+               read -rp "Cloudflare API token (optional, Enter to skip): " tok
+               /usr/local/bin/ragnar-slowdns-setup "$v" "$tok" "$mtu" "" "$target"
                pause ;;
-            3) read -rp "MTU (default 1232): " v
-               RAGNAR_DIR="$RAGNAR_DIR" bash "$RAGNAR_DIR/core/slowdns-setup.sh" "" "$v"
+            2) echo "1. dnstt listener on UDP 5300:"
+               if ss -ulnp | grep -q ":5300"; then echo "   OK - listening"
+               else echo "   NOT listening - restarting via setup"; /usr/local/bin/ragnar-slowdns-setup "$ns" "" "$mtu" "" "$target"; fi
+               echo "2. NS delegation for ${ns:-<unset>} (via Google DNS):"
+               if [ -n "$ns" ]; then
+                   curl -fsSL "https://dns.google/resolve?name=${ns}&type=NS" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    ans=[a['data'] for a in d.get('Answer',[]) if a.get('type')==2]
+    print('   NS ->', ans[0] if ans else 'NOT FOUND - create the NS record in Cloudflare')
+except Exception:
+    print('   could not check (no network?)')
+" || echo "   could not check"
+               fi
                pause ;;
-            4) read -rp "Resolver IP (default 1.1.1.1): " v
-               RAGNAR_DIR="$RAGNAR_DIR" bash "$RAGNAR_DIR/core/slowdns-setup.sh" "" "" "$v"
+            3) echo "Backend: 1) OpenSSH 22   2) Dropbear 109 (lighter handshake)"
+               read -rp "Choice [1-2]: " b
+               if [ "$b" = "2" ]; then t=109; else t=22; fi
+               /usr/local/bin/ragnar-slowdns-setup "$ns" "" "$mtu" "" "$t"
+               echo "Backend now 127.0.0.1:$t"; pause ;;
+            4) read -rp "Resolver IP (e.g. 8.8.8.8, 1.1.1.1, or this server's IP): " v
+               [ -n "$v" ] && /usr/local/bin/ragnar-slowdns-setup "$ns" "" "$mtu" "$v" "$target"
                pause ;;
-            5) RAGNAR_DIR="$RAGNAR_DIR" bash "$RAGNAR_DIR/core/slowdns-setup.sh"
+            5) read -rp "MTU (1400 = max speed, 1232 = default, 512 = strict networks): " v
+               v=${v:-1232}
+               /usr/local/bin/ragnar-slowdns-setup "$ns" "" "$v" "" "$target"
                pause ;;
+            6) if [ -x /usr/local/bin/dnstt-server ]; then
+                   rm -f "$SD/server.key" "$SD/server.pub"
+                   /usr/local/bin/dnstt-server -gen-key -privkey-file "$SD/server.key" -pubkey-file "$SD/server.pub"
+                   systemctl restart slowdns 2>/dev/null || true
+                   echo "New public key: $(cat "$SD/server.pub" 2>/dev/null)"
+               else echo "dnstt-server not installed yet - use option 1 first"; fi
+               pause ;;
+            7) rm -f /usr/local/bin/dnstt-server "$SD/.turbo_kcp_patched"
+               /usr/local/bin/ragnar-slowdns-setup "$ns" "" "1400" "" "109"
+               echo "Turbo preset applied: rebuilt binary, MTU 1400, Dropbear backend"
+               pause ;;
+            8) systemctl restart slowdns; echo restarted; pause ;;
+            9) systemctl stop slowdns; systemctl disable slowdns 2>/dev/null; echo stopped; pause ;;
             0) return ;;
         esac
     done

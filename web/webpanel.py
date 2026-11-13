@@ -521,15 +521,27 @@ def page_services(csrf, flash=""):
             f'<input type="hidden" name="unit" value="{esc(s)}">'
             f'<button class="btn sm grey">Restart</button></form></td></tr>')
     st = ragnar.load_settings()
+
+    def sd_file(name, default="-"):
+        try:
+            with open(os.path.join("/etc/vps-panel/slowdns", name)) as fh:
+                return fh.read().strip() or default
+        except OSError:
+            return default
+
     slow = (f"<h3>SlowDNS</h3><table>"
-            f"<tr><td>Nameserver</td><td>{esc(st.get('ns', '-'))}</td></tr>"
+            f"<tr><td>Nameserver</td><td>"
+            f"{esc(sd_file('nameserver', st.get('ns', '-')))}</td></tr>"
             f"<tr><td>Public key</td><td style='word-break:break-all'>"
-            f"{esc(st.get('slowdns_pubkey', '-'))}</td></tr>"
+            f"{esc(sd_file('server.pub', st.get('slowdns_pubkey', '-')))}"
+            f"</td></tr>"
             f"<tr><td>Build</td><td>dnstt-server turbo "
             f"(KCP 10ms, window 1024, smux 4MB)</td></tr>"
-            f"<tr><td>MTU</td><td>{esc(st.get('slowdns_mtu', 1232))}</td></tr>"
+            f"<tr><td>MTU</td><td>{esc(sd_file('mtu', '1232'))}</td></tr>"
+            f"<tr><td>Backend</td><td>127.0.0.1:"
+            f"{esc(sd_file('target_port', '22'))}</td></tr>"
             f"<tr><td>Resolver</td><td>"
-            f"{esc(st.get('slowdns_resolver', '1.1.1.1'))}</td></tr></table>")
+            f"{esc(sd_file('dns_resolver', '1.1.1.1'))}</td></tr></table>")
     return layout("Services", "services",
                   f'<div class="tblwrap"><table>{rows}</table></div>{slow}',
                   flash)
