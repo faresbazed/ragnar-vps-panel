@@ -8,10 +8,12 @@ import checker as C  # noqa: E402
 SS_SAMPLE = """Recv-Q Send-Q Local Address:Port Peer Address:Port Process
 0 0 127.0.0.1:109 127.0.0.1:51234 users:(("dropbear",pid=1234,fd=5))
 \t cubic wscale:7,7 rto:204 bytes_sent:10485760 bytes_received:2048
-0 0 10.0.0.5:22 1.2.3.4:5555 users:(("sshd",pid=55,fd=3))
+0 0 10.0.0.5:22 1.2.3.4:5555 users:(("sshd",pid=55,fd=3),("sshd",pid=999,fd=3))
 \t cubic bytes_sent:100 bytes_received:200
 0 0 10.0.0.5:443 5.5.5.5:443 users:(("haproxy",pid=9,fd=1))
 \t cubic bytes_sent:999999 bytes_received:999999
+0 0 10.0.0.5:53100 9.9.9.9:443 users:(("sshd",pid=55,fd=9))
+\t cubic bytes_sent:777777 bytes_received:888888
 """
 
 
@@ -28,9 +30,14 @@ class TestCounterDelta(unittest.TestCase):
 
 class TestSocketAccounting(unittest.TestCase):
     def setUp(self):
-        C._pid_user = lambda pid: {1234: "fares", 55: "channel"}.get(pid)
+        C._pid_user = lambda pid: {1234: "fares", 55: "channel",
+                                   999: "root"}.get(pid)
 
     def test_parse_only_daemon_sockets(self):
+        # haproxy socket excluded (not a daemon), the sshd outbound
+        # socket to a forwarded target excluded (ephemeral local port,
+        # would double-count the relay), root monitor pid skipped in
+        # favour of the per-user child pid.
         socks = C.parse_socket_bytes(SS_SAMPLE)
         self.assertEqual(len(socks), 2)
         self.assertEqual(

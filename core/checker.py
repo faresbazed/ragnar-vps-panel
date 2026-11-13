@@ -12,8 +12,11 @@ Traffic counters:
     into used_bytes (Xray resets its counters on restart, so we accumulate
     deltas into the panel DB each run).
   * SSH: per-socket byte counters from `ss -tnpi` (tcp_info bytes_sent /
-    bytes_received on every established sshd/dropbear socket), accumulated
-    the same way. This is the only reliable per-user source: iptables
+    bytes_received on the client-facing socket of each sshd/dropbear
+    session - local port 22/109/143; the daemon's outbound sockets to
+    forwarded targets are excluded so relayed bytes count once),
+    accumulated the same way. This is the only reliable per-user source:
+    iptables
     owner-match does NOT see daemon relay traffic, because an accepted
     socket belongs to the root listener, not the per-user child — owner
     counters stayed at ~0 while users tunnelled gigabytes. Sockets that
@@ -59,20 +62,38 @@ def _pid_user(pid):
         return None
 
 
+DAEMON_PORTS = {"22", "109", "143"}  # sshd / dropbear listen ports
+
+
 def parse_socket_bytes(ss_text):
-    """{(user, local, peer): (bytes_sent, bytes_received)} for live
-    sshd/dropbear sockets, from `ss -tnpi state established` output."""
+    """{(user, local, peer): (bytes_sent, bytes_received)} for the
+    CLIENT-facing sockets of live sshd/dropbear sessions, from
+    `ss -tnpi state established` output.
+
+    Only sockets whose local port is a daemon listen port count: those
+    carry exactly the bytes between the user and the box (the same
+    up+down semantics as the Xray counters). The daemon's outbound
+    sockets to forwarded targets have ephemeral local ports and are
+    excluded, so relayed bytes are never double-counted.
+    """
     sockets = {}
     pending = None
     for line in ss_text.splitlines():
-        m = re.search(r'(\S+:\d+)\s+(\S+:\d+)\s+users:\(\("(\w+)",pid=(\d+),', line)
+        m = re.search(r'(\S+):(\d+)\s+(\S+:\d+)\s+users:\(\((.*?)\)\)', line)
         if m:
             pending = None
-            prog = m.group(3)
-            if prog in ("sshd", "dropbear"):
-                user = _pid_user(int(m.group(4)))
-                if user:
-                    pending = (user, m.group(1), m.group(2))
+            blob = m.group(4)
+            if m.group(2) in DAEMON_PORTS and (
+                    '"sshd"' in blob or '"dropbear"' in blob):
+                user = None
+                for pid in re.findall(r"pid=(\d+)", blob):
+                    u = _pid_user(int(pid))
+                    if u and u != "root":
+                        user = u
+                        break
+                    user = user or u
+                if user and user != "root":
+                    pending = (user, f"{m.group(1)}:{m.group(2)}", m.group(3))
             continue
         if pending is not None:
             sent = re.search(r"bytes_sent:(\d+)", line)
