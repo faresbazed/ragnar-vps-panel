@@ -97,16 +97,16 @@ conntrack headroom, `LimitNOFILE` everywhere.
   upstream hash) — listen 36712 with the upstream-optimized 80 MB
   receive buffer, ports **20000–65535 redirected** to it, badvpn-udpgw
   on 7300, SSH users mirrored as auth entries.
-- **SlowDNS** (DNSTT) — UDP/TCP 53 redirected to dnstt on 5300 →
-  SSH 22; keypair generated at install, public key shown in the menu.
-  **KCP Turbo Speed Patch included:** the installer also builds a
-  patched dnstt-server from upstream source (`configs/kcp-turbo.patch`)
-  with aggressive KCP settings — `SetNoDelay(1, 20, 2, 1)` and
-  `SetWindowSize(8192, 8192)` instead of stock nodelay-off and window
-  64 — and runs SlowDNS on it by default. It is wire-compatible with
-  unmodified dnstt clients and apps (nodelay is a local scheduling
-  choice; the window is advertised in the KCP header). Toggle it in
-  the SlowDNS menu (stock binary ⇄ turbo binary).
+- **SlowDNS** (DNSTT) — UDP 53 redirected to dnstt on 5300 → SSH 22;
+  keypair generated at install and preserved across updates, public
+  key shown in the menu. The server is the turbo-patched dnstt-server
+  build from the sister panel
+  ([Ragnar-VPS-Management-Panel](https://github.com/faresbazed/Ragnar-VPS-Management-Panel)):
+  KCP `SetNoDelay(1, 10, 2, 1)` + `SetWindowSize(1024, 1024)`,
+  turbotunnel `QueueSize = 1024`, smux buffers 4 MB, applied by
+  `core/slowdns-setup.sh` at build time. The systemd unit takes an
+  explicit `-mtu` (default **1232**, editable in the SlowDNS menu,
+  together with the nameserver and the client resolver).
 
 ### Panel
 - Header: VPS IP, ISP, OS, uptime, CPU/RAM/disk, server time, bandwidth,

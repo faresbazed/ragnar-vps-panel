@@ -525,8 +525,11 @@ def page_services(csrf, flash=""):
             f"<tr><td>Nameserver</td><td>{esc(st.get('ns', '-'))}</td></tr>"
             f"<tr><td>Public key</td><td style='word-break:break-all'>"
             f"{esc(st.get('slowdns_pubkey', '-'))}</td></tr>"
-            f"<tr><td>KCP Turbo</td><td>"
-            f"{'ON' if st.get('slowdns_kcp') else 'OFF'}</td></tr></table>")
+            f"<tr><td>Build</td><td>dnstt-server turbo "
+            f"(KCP 10ms, window 1024, smux 4MB)</td></tr>"
+            f"<tr><td>MTU</td><td>{esc(st.get('slowdns_mtu', 1232))}</td></tr>"
+            f"<tr><td>Resolver</td><td>"
+            f"{esc(st.get('slowdns_resolver', '1.1.1.1'))}</td></tr></table>")
     return layout("Services", "services",
                   f'<div class="tblwrap"><table>{rows}</table></div>{slow}',
                   flash)

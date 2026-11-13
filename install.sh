@@ -97,6 +97,7 @@ install -m 755 "$SRC/core/ragnar.py"   "$BASE/core/ragnar.py"
 install -m 755 "$SRC/core/checker.py"  "$BASE/core/checker.py"
 install -m 755 "$SRC/core/wsproxy.py"  "$BASE/core/wsproxy.py"
 install -m 755 "$SRC/core/watchdog.sh" "$BASE/core/watchdog.sh"
+install -m 755 "$SRC/core/slowdns-setup.sh" "$BASE/core/slowdns-setup.sh"
 install -m 755 "$SRC/menu.sh"          "$BASE/menu.sh"
 install -m 755 "$SRC/uninstall.sh"     "$BASE/uninstall.sh"
 install -m 755 "$SRC/web/webpanel.py"  "$BASE/web/webpanel.py"
@@ -385,113 +386,16 @@ iptables -t nat -C POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP
     iptables -t nat -A POSTROUTING -o "$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+')" -j MASQUERADE
 
 # ---------------------------------------------------------------------
-# SlowDNS (DNSTT/SLDNS build) - SSH over DNS on 53
+# SlowDNS - the dnstt-server implementation from
+# faresbazed/Ragnar-VPS-Management-Panel: a turbo-patched build
+# (KCP NoDelay(1, 10, 2, 1), window 1024, QueueSize 1024, 4 MB smux
+# buffers) with a systemd unit that takes -mtu from settings
+# (default 1232). core/slowdns-setup.sh builds the binary,
+# preserves/generates the keypair, writes the unit and restarts the
+# service; the SlowDNS menu re-runs it when NS/MTU/resolver change.
 # ---------------------------------------------------------------------
-if fetch_bin https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-server \
-        /usr/local/bin/sldns-server; then
-    if [ ! -f "$BASE/slowdns/server.key" ]; then
-        (cd "$BASE/slowdns" && /usr/local/bin/sldns-server -gen-key \
-            -privkey-file server.key -pubkey-file server.pub 2>/dev/null)
-    fi
-    # Fallback: upstream's shared keypair (public, used by every SL install)
-    if [ ! -s "$BASE/slowdns/server.key" ]; then
-        wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/server.key \
-            -O "$BASE/slowdns/server.key"
-        wget -q https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/server.pub \
-            -O "$BASE/slowdns/server.pub"
-        warn "SlowDNS: own keypair generation failed - using upstream's shared keypair"
-    fi
-    PUBKEY=$(cat "$BASE/slowdns/server.pub" 2>/dev/null || true)
-    python3 - "$PUBKEY" <<'PY'
-import json, os, sys
-p = "/etc/ragnar/settings.json"
-s = json.load(open(p)) if os.path.exists(p) else {}
-s["slowdns_pubkey"] = sys.argv[1]
-json.dump(s, open(p, "w"), indent=2)
-PY
-else
-    warn "SlowDNS binary download failed - module skipped"
-fi
-# ---------------------------------------------------------------------
-# SlowDNS KCP Turbo Speed Patch: a dnstt-server built from upstream
-# source with aggressive KCP settings (configs/kcp-turbo.patch:
-# SetNoDelay(1, 20, 2, 1) and SetWindowSize(8192, 8192) instead of the
-# stock nodelay-off and window 64). Wire-compatible with stock dnstt
-# clients and apps - only the server binary changes. Built here rather
-# than shipped because the panel repo carries text files only.
-# ---------------------------------------------------------------------
-SLOWDNS_BIN=/usr/local/bin/sldns-server
-if [ ! -x /usr/local/bin/sldns-server-kcp ]; then
-    log "Building SlowDNS KCP Turbo binary from dnstt source + patch..."
-    KCP_LOG=/tmp/ragnar-kcp-build.log
-    : > "$KCP_LOG"
-    command -v git >/dev/null 2>&1 || apt-get install -y -q git >>"$KCP_LOG" 2>&1 || true
-    command -v patch >/dev/null 2>&1 || apt-get install -y -q patch >>"$KCP_LOG" 2>&1 || true
-    # dnstt requires Go >= 1.21, but distro golang is older on some LTS
-    # releases (Ubuntu 22.04 ships Go 1.18) - detect that and fall back
-    # to the official toolchain tarball instead of failing silently.
-    go_is_new_enough() {
-        [ -n "$1" ] || return 1
-        local maj min
-        maj=$("$1" version 2>/dev/null | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\1/')
-        min=$("$1" version 2>/dev/null | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\2/')
-        [ "${maj:-0}" -gt 1 ] || { [ "${maj:-0}" -eq 1 ] && [ "${min:-0}" -ge 21 ]; }
-    }
-    GO_BIN=$(command -v go || true)
-    if ! go_is_new_enough "$GO_BIN"; then
-        apt-get install -y -q golang-go >>"$KCP_LOG" 2>&1 || true
-        GO_BIN=$(command -v go || true)
-    fi
-    if ! go_is_new_enough "$GO_BIN"; then
-        case "$(uname -m)" in aarch64|arm64) GA=arm64 ;; *) GA=amd64 ;; esac
-        if wget -q "https://go.dev/dl/go1.22.12.linux-${GA}.tar.gz" -O /tmp/go.tgz >>"$KCP_LOG" 2>&1 && \
-           rm -rf /usr/local/go-1.22 /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz >>"$KCP_LOG" 2>&1 && \
-           mv /usr/local/go /usr/local/go-1.22; then
-            GO_BIN=/usr/local/go-1.22/bin/go
-        fi
-        rm -f /tmp/go.tgz
-    fi
-    KCP_TMP=$(mktemp -d -p /var/tmp)
-    # NOTE: no --depth here - bamsoftware.com serves git over the dumb
-    # HTTP protocol, which rejects shallow clones outright ("dumb http
-    # transport does not support shallow capabilities"). That one flag
-    # was the whole reason the KCP build failed on some servers.
-    if go_is_new_enough "$GO_BIN" && \
-       git clone https://www.bamsoftware.com/git/dnstt.git "$KCP_TMP/dnstt" >>"$KCP_LOG" 2>&1 && \
-       (cd "$KCP_TMP/dnstt" && patch -p1 -s --batch < "$SRC/configs/kcp-turbo.patch" && \
-        cd dnstt-server && GOPROXY=https://proxy.golang.org,direct CGO_ENABLED=0 "$GO_BIN" build -trimpath -o /usr/local/bin/sldns-server-kcp .) >>"$KCP_LOG" 2>&1; then
-        log "KCP Turbo binary built: /usr/local/bin/sldns-server-kcp"
-    else
-        warn "KCP Turbo build failed - stock SlowDNS only. Last lines of $KCP_LOG:"
-        tail -n 15 "$KCP_LOG" 2>/dev/null | sed 's/^/    /'
-    fi
-    rm -rf "$KCP_TMP"
-fi
-if [ -x /usr/local/bin/sldns-server-kcp ]; then
-    SLOWDNS_BIN=/usr/local/bin/sldns-server-kcp
-fi
-python3 - "$SLOWDNS_BIN" <<'PY'
-import json, os, sys
-p = "/etc/ragnar/settings.json"
-s = json.load(open(p)) if os.path.exists(p) else {}
-s["slowdns_kcp"] = sys.argv[1].endswith("sldns-server-kcp")
-json.dump(s, open(p, "w"), indent=2)
-PY
-cat > /etc/systemd/system/slowdns.service <<EOF
-[Unit]
-Description=SlowDNS DNSTT (Ragnar)
-After=network.target
-[Service]
-ExecStart=$SLOWDNS_BIN -udp :5300 -privkey-file $BASE/slowdns/server.key ${NS:-ns.invalid} 127.0.0.1:22
-Restart=always
-RestartSec=2
-LimitNOFILE=1048576
-[Install]
-WantedBy=multi-user.target
-EOF
-# SlowDNS (dnstt) is UDP-only - redirect UDP 53 onto the listener.
-iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || \
-    iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+RAGNAR_DIR="$BASE" bash "$BASE/core/slowdns-setup.sh" || \
+    warn "SlowDNS setup failed - re-run: RAGNAR_DIR=$BASE bash $BASE/core/slowdns-setup.sh"
 
 # ---------------------------------------------------------------------
 # Cloudflared
