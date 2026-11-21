@@ -609,7 +609,7 @@ def links_for(name):
         vmess = "vmess://" + b64e(json.dumps(vmess_obj, separators=(",", ":")).encode())
         trojan = (f"trojan://{password}@{addr}:{port}?"
                   f"{_ws_params(addr, port, sec, PATHS['trojan'])}#{tag}-TROJAN")
-        ss_plain = b64url_nopad(f"{SS_METHOD}:{u['ss_password']}".encode())
+        ss_plain = b64url_nopad(f"{SS_METHOD}:{_ss_server_key()}:{u['ss_password']}".encode())
         ssws = f"ss://{ss_plain}@{addr}:{port}?type=ws&path={PATHS['ssws']}&host={addr}"
         if sec == "tls":
             ssws += f"&security=tls&sni={addr}"

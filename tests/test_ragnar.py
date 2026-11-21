@@ -259,6 +259,24 @@ if failures:
 print("ALL CORE TESTS PASSED")
 
 
+class TestSSWSLinks(unittest.TestCase):
+    def test_userinfo_matches_multi_user_server_config(self):
+        config = R.gen_xray_config()
+        settings = next(i["settings"] for i in config["inbounds"]
+                        if i["protocol"] == "shadowsocks")
+        client = next(c for c in settings["clients"] if c["email"] == "bob")
+        expected = f"{settings['method']}:{settings['password']}:{client['password']}"
+        links = [group["SSWS"] for group in R.links_for("bob").values()
+                 if "SSWS" in group]
+        self.assertTrue(links)
+        for link in links:
+            with self.subTest(link=link):
+                userinfo = link.removeprefix("ss://").split("@", 1)[0]
+                self.assertRegex(userinfo, r"^[A-Za-z0-9_-]+$")
+                decoded = base64.urlsafe_b64decode(userinfo + "=" * (-len(userinfo) % 4))
+                self.assertEqual(decoded.decode(), expected)
+
+
 class TestShareLinkPasswords(unittest.TestCase):
     def test_reserved_password_userinfo(self):
         with patch.object(ragnar.os, "urandom", return_value=b"\xff" * 16):
