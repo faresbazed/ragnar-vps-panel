@@ -49,8 +49,17 @@ for i, name in enumerate(("O'Brien", "x');alert(1);//", 'quotes"<&>\\\\end')):
         subprocess.run([sys.executable, os.path.join(ROOT, "web", "webpanel.py"),
                         "--set-password", "admin", "testpass123"],
                        env=env, capture_output=True, text=True, check=True)
+        server = """
+import runpy
+import sys
+from unittest.mock import patch
+sys.path.insert(0, 'core')
+import ragnar
+with patch.object(ragnar, 'sync_linux_user'):
+    runpy.run_path('web/webpanel.py', run_name='__main__')
+"""
         cls.proc = subprocess.Popen(
-            [sys.executable, os.path.join(ROOT, "web", "webpanel.py")],
+            [sys.executable, "-c", server], cwd=ROOT,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True)
         no_proxy_opener = urllib.request.build_opener(

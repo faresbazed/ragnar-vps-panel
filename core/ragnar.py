@@ -288,6 +288,19 @@ def ssh_add(username, password, days, quota_gb, ip_limit):
 
 
 @account_transaction
+def ssh_create(username, password, days, quota_gb, ip_limit):
+    rec = ssh_add(username, password, days, quota_gb, ip_limit)
+    try:
+        sync_linux_user(username, password, rec["expiry"])
+    except SSHSyncError:
+        users = load_ssh()
+        del users[username]
+        save_ssh(users)
+        raise
+    return rec
+
+
+@account_transaction
 def ssh_edit(username, days=None, quota_gb=None, ip_limit=None, password=None,
              extend=False, enable=None):
     users = load_ssh()
@@ -1037,22 +1050,62 @@ def apply_configs(force_restart=False):
                        capture_output=True, text=True)
 
 
+class SSHSyncError(RuntimeError):
+    def __init__(self, message, returncode=None):
+        super().__init__(message)
+        self.returncode = returncode
+
+
+def _run_account_command(cmd, **kwargs):
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except OSError as exc:
+        raise SSHSyncError(f"Could not run {cmd[0]}: {exc}") from exc
+    if result.returncode:
+        raise SSHSyncError(f"{cmd[0]} exited with status {result.returncode}", result.returncode)
+
+
 def sync_linux_user(username, password, expiry, enabled=True):
     """Create/update the real Linux account behind an SSH DB record."""
     _validate_username(username)
-    exists = subprocess.run(["id", username],
-                            capture_output=True, text=True).returncode == 0
-    if not exists:
-        subprocess.run(["useradd", "-m", "-s", "/bin/false",
-                        "-e", str(expiry), username],
-                       capture_output=True, text=True)
-    subprocess.run(["chpasswd"], input=f"{username}:{password}\n",
-                   capture_output=True, text=True)
-    subprocess.run(["chage", "-E", str(expiry), username],
-                   capture_output=True, text=True)
-    subprocess.run(["usermod", "-U" if enabled else "-L", username],
-                   capture_output=True, text=True)
-    sync_udp_custom()
+    try:
+        exists = subprocess.run(["id", username],
+                                capture_output=True, text=True).returncode == 0
+    except OSError as exc:
+        raise SSHSyncError(f"Could not run id: {exc}") from exc
+    created = False
+    try:
+        if not exists:
+            try:
+                _run_account_command(["useradd", "-m", "-s", "/bin/false",
+                                      "-e", str(expiry), username])
+            except SSHSyncError as exc:
+                created = exc.returncode == 12
+                raise
+            created = True
+        if not enabled:
+            _run_account_command(["usermod", "-L", username])
+            sync_udp_custom()
+        try:
+            _run_account_command(["chpasswd"], input=f"{username}:{password}\n")
+            _run_account_command(["chage", "-E", str(expiry), username])
+        finally:
+            if not enabled:
+                _run_account_command(["usermod", "-L", username])
+        if enabled:
+            _run_account_command(["usermod", "-U", username])
+    except SSHSyncError as exc:
+        if created:
+            try:
+                result = subprocess.run(["userdel", "-r", "--", username],
+                                        capture_output=True, text=True)
+                if result.returncode not in (0, 6):
+                    raise SSHSyncError(f"userdel exited with status {result.returncode}")
+            except (OSError, SSHSyncError) as cleanup:
+                raise SSHSyncError(f"{exc}; rollback failed: {cleanup}") from exc
+        raise
+    if enabled:
+        sync_udp_custom()
 
 
 # --------------------------------------------------------------------------
@@ -1256,8 +1309,7 @@ def main(argv):
     try:
         if cmd == "ssh-add":
             u, p, d, q, i = args[0], args[1], int(args[2]), float(args[3]), int(args[4])
-            rec = ssh_add(u, p, d, q, i)
-            sync_linux_user(u, p, rec["expiry"])
+            ssh_create(u, p, d, q, i)
             print(f"SSH user '{u}' created.\n\n{fmt_ssh_info(u)}")
         elif cmd == "ssh-edit":
             kw = {}
@@ -1373,7 +1425,7 @@ def main(argv):
         else:
             print(f"unknown command: {cmd}", file=sys.stderr)
             return 2
-    except (ValueError, IndexError, SSHDeletionError) as exc:
+    except (ValueError, IndexError, SSHDeletionError, SSHSyncError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 1
     return 0
